@@ -1,0 +1,57 @@
+agent: dreamerv3
+seed: 42
+
+env:
+  name: Craftax-Classic-Pixels-v1
+  auto_reset: true
+
+dreamerv3:
+  num_updates: 100
+  num_worlds: 8
+  imag_horizon: 16
+
+  dynamics:
+    deter_size: 512
+    hidden_size: 256
+    num_layers: 1
+    blocks: 8
+    stoch: 32
+    classes: 32
+
+  encoder:
+    depth: 32
+    mults: [2, 3, 4, 4]
+    hidden_size: 256
+
+  decoder:
+    depth: 32
+    mults: [2, 3, 4, 4]
+    hidden_size: 256
+    reward_layers: 2
+    num_bins: 255
+    min_val: -1000.0
+    max_val: 1000.0
+    cont_layers: 2
+
+  posterior:
+    num_layers: 2
+    hidden_size: 256
+    stoch: 32
+    classes: 32
+
+  prior:
+    num_layers: 2
+    hidden_size: 256
+    stoch: 32
+    classes: 32
+
+  actor:
+    num_layers: 2
+    hidden_size: 256
+
+  critic:
+    num_layers: 2
+    hidden_size: 256
+    num_bins: 255
+    min_val: -1000.0
+    max_val: 1000.0
