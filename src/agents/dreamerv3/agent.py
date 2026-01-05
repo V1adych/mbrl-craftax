@@ -101,34 +101,16 @@ class DreamerV3:
         batch_size = self.config.num_worlds
         tab_key = jax.random.key(0)
 
-        print("\n" + "=" * 80)
         print(f"{'MODEL ARCHITECTURES':^80}")
-        print("=" * 80)
-
         dummy_obs = jnp.zeros((batch_size, *obs_shape))
-        print("\n[Encoder]")
-        print(self.models.encoder.tabulate(tab_key, dummy_obs))
-
+        print(self.models.encoder.tabulate(tab_key, dummy_obs, compute_flops=True, compute_vjp_flops=True))
         deter = self.models.dynamics.get_initial_deter(batch_size)
         tokens = jnp.zeros((batch_size, self.config.encoder.hidden_size))
         stoch = jnp.zeros((batch_size, self.config.dynamics.stoch, self.config.dynamics.classes))
         act = jnp.zeros((batch_size,), dtype=jnp.int32)
-
-        print("\n[Posterior]")
         print(self.models.posterior.tabulate(tab_key, deter, tokens, compute_flops=True, compute_vjp_flops=True))
-
-        print("\n[Prior]")
         print(self.models.prior.tabulate(tab_key, deter, compute_flops=True, compute_vjp_flops=True))
-
-        print("\n[Actor]")
         print(self.models.actor.tabulate(tab_key, deter, stoch, compute_flops=True, compute_vjp_flops=True))
-
-        print("\n[Critic]")
         print(self.models.critic.tabulate(tab_key, deter, stoch, compute_flops=True, compute_vjp_flops=True))
-
-        print("\n[Decoder]")
         print(self.models.decoder.tabulate(tab_key, deter, stoch, compute_flops=True, compute_vjp_flops=True))
-
-        print("\n[Dynamics]")
         print(self.models.dynamics.tabulate(tab_key, deter, stoch, act, compute_flops=True, compute_vjp_flops=True))
-        print("=" * 80 + "\n")

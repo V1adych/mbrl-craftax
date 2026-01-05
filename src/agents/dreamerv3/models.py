@@ -74,7 +74,7 @@ class Encoder(linen.Module):
     def __call__(self, obs: jax.Array):
         x = obs - 0.5
         for i, mult in enumerate(self.config.mults):
-            x = linen.Conv(features=self.config.depth * mult, kernel_size=(5, 5), strides=(2, 2), name=f"conv_{i}")(x)
+            x = linen.Conv(features=self.config.depth * mult, kernel_size=(3, 3), strides=(2, 2), padding="VALID", name=f"conv_{i}")(x)
             x = jax.nn.silu(linen.RMSNorm(name=f"norm_{i}")(x))
         x = x.reshape((*x.shape[:-3], -1))
         x = jax.nn.silu(linen.RMSNorm(name="dense_norm")(linen.Dense(features=self.config.hidden_size, name="dense")(x)))
@@ -95,14 +95,12 @@ class Decoder(linen.Module):
         features = jnp.concat([deter, stoch], axis=-1)
 
         x = jax.nn.silu(linen.RMSNorm(name="obs_norm")(linen.Dense(features=self.config.hidden_size, name="obs_dense")(features)))
-        x = linen.Dense(features=self.config.depth * self.config.mults[-1] * 4 * 4, name="spatial_dense")(x)
-        x = x.reshape((*x.shape[:-1], 4, 4, self.config.depth * self.config.mults[-1]))
-
+        x = linen.Dense(features=self.config.depth * self.config.mults[-1] * 3 * 3, name="spatial_dense")(x)
+        x = x.reshape((*x.shape[:-1], 3, 3, self.config.depth * self.config.mults[-1]))
         for i, mult in reversed(list(enumerate(self.config.mults[:-1]))):
-            x = linen.ConvTranspose(features=self.config.depth * mult, kernel_size=(5, 5), strides=(2, 2), name=f"obs_conv_{i}")(x)
+            x = linen.ConvTranspose(features=self.config.depth * mult, kernel_size=(3, 3), strides=(2, 2), padding="VALID", name=f"obs_conv_{i}")(x)
             x = jax.nn.silu(linen.RMSNorm(name=f"obs_norm_{i}")(x))
-
-        obs = linen.ConvTranspose(features=3, kernel_size=(5, 5), strides=(2, 2), name="obs_final")(x)
+        obs = linen.ConvTranspose(features=3, kernel_size=(3, 3), strides=(2, 2), padding="VALID", name="obs_final")(x)
 
         r = features
         for i in range(self.config.reward_layers):
