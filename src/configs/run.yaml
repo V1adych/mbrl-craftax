@@ -38,12 +38,14 @@ dreamerv3:
     hidden_size: 256
     stoch: 32
     classes: 32
+    uniform_frac: 0.01
 
   prior:
     num_layers: 2
     hidden_size: 256
     stoch: 32
     classes: 32
+    uniform_frac: 0.01
 
   actor:
     num_layers: 2

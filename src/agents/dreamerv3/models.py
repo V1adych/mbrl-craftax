@@ -63,6 +63,9 @@ class Dynamics(linen.Module):
         deter_new = jnp.reshape(update * cand + (1 - update) * deter_blocks, deter.shape)
         return deter_new
 
+    def get_initial_deter(self, batch_size: int):
+        return jnp.zeros((batch_size, self.config.deter_size), dtype=jnp.float32)
+
 
 class Encoder(linen.Module):
     config: DictConfig
@@ -123,7 +126,7 @@ class Decoder(linen.Module):
         reward_target = two_hot_symlog(target.reward, self.bins.value)
         reward_loss = -jnp.sum(reward_target * jax.nn.log_softmax(pred.reward), axis=-1).mean()
         cont_loss = -jnp.sum(target.cont * jax.nn.log_sigmoid(pred.cont) + (1.0 - target.cont) * jax.nn.log_sigmoid(-pred.cont), axis=-1).mean()
-        return obs_loss + reward_loss + cont_loss
+        return WorldModelOutputs(obs=obs_loss, reward=reward_loss, cont=cont_loss)
 
 
 class Posterior(linen.Module):
@@ -135,7 +138,12 @@ class Posterior(linen.Module):
         for i in range(self.config.num_layers):
             x = jax.nn.silu(linen.RMSNorm(name=f"norm_{i}")(linen.Dense(features=self.config.hidden_size, name=f"dense_{i}")(x)))
         logits = linen.Dense(features=self.config.stoch * self.config.classes, name="logits")(x)
-        return distrax.OneHotCategorical(logits=logits.reshape((*logits.shape[:-1], self.config.stoch, self.config.classes)))
+        logits = logits.reshape((*logits.shape[:-1], self.config.stoch, self.config.classes))
+        return logits
+
+    def postprocess(self, logits: jax.Array):
+        probs = jax.nn.softmax(logits, axis=-1) * (1 - self.config.uniform_frac) + self.config.uniform_frac / logits.shape[-1]
+        return distrax.OneHotCategorical(probs=probs)
 
 
 class Prior(linen.Module):
@@ -147,7 +155,15 @@ class Prior(linen.Module):
         for i in range(self.config.num_layers):
             x = jax.nn.silu(linen.RMSNorm(name=f"norm_{i}")(linen.Dense(features=self.config.hidden_size, name=f"dense_{i}")(x)))
         logits = linen.Dense(features=self.config.stoch * self.config.classes, name="logits")(x)
-        return distrax.OneHotCategorical(logits=logits.reshape((*logits.shape[:-1], self.config.stoch, self.config.classes)))
+        logits = logits.reshape((*logits.shape[:-1], self.config.stoch, self.config.classes))
+        return logits
+
+    def postprocess(self, logits: jax.Array):
+        probs = jax.nn.softmax(logits, axis=-1) * (1 - self.config.uniform_frac) + self.config.uniform_frac / logits.shape[-1]
+        return distrax.OneHotCategorical(probs=probs)
+
+    def loss(self, pred: jax.Array, target: jax.Array):
+        return -jnp.sum(target * jax.nn.log_softmax(pred), axis=-1).mean()
 
 
 class Actor(linen.Module):
@@ -161,6 +177,9 @@ class Actor(linen.Module):
         for i in range(self.config.num_layers):
             x = jax.nn.silu(linen.RMSNorm(name=f"norm_{i}")(linen.Dense(features=self.config.hidden_size, name=f"dense_{i}")(x)))
         logits = linen.Dense(features=self.act_space, name="logits")(x)
+        return logits
+
+    def postprocess(self, logits: jax.Array):
         return distrax.Categorical(logits=logits)
 
 
