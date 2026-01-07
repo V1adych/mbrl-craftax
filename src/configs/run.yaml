@@ -9,6 +9,13 @@ dreamerv3:
   num_updates: 100
   num_worlds: 8
   imag_horizon: 16
+  max_grad_norm: 2.5
+  lr: 2e-2
+  weight_decay: 1e-2
+  rollout_length: 32
+  replay_buffer:
+    max_length: 4096
+
 
   dynamics:
     deter_size: 1024
@@ -36,14 +43,14 @@ dreamerv3:
   posterior:
     num_layers: 2
     hidden_size: 256
-    stoch: 32
+    stoch_size: 32
     classes: 32
     uniform_frac: 0.01
 
   prior:
     num_layers: 2
     hidden_size: 256
-    stoch: 32
+    stoch_size: 32
     classes: 32
     uniform_frac: 0.01
 

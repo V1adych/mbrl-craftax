@@ -131,12 +131,12 @@ class Posterior(linen.Module):
     config: DictConfig
 
     @linen.compact
-    def __call__(self, deter: jax.Array, tokens: jax.Array):
-        x = jnp.concat([deter, tokens], axis=-1)
+    def __call__(self, deter: jax.Array, embed: jax.Array):
+        x = jnp.concat([deter, embed], axis=-1)
         for i in range(self.config.num_layers):
             x = jax.nn.silu(linen.RMSNorm(name=f"norm_{i}")(linen.Dense(features=self.config.hidden_size, name=f"dense_{i}")(x)))
-        logits = linen.Dense(features=self.config.stoch * self.config.classes, name="logits")(x)
-        logits = logits.reshape((*logits.shape[:-1], self.config.stoch, self.config.classes))
+        logits = linen.Dense(features=self.config.stoch_size * self.config.classes, name="logits")(x)
+        logits = logits.reshape((*logits.shape[:-1], self.config.stoch_size, self.config.classes))
         return logits
 
     def postprocess(self, logits: jax.Array):
@@ -152,8 +152,8 @@ class Prior(linen.Module):
         x = deter
         for i in range(self.config.num_layers):
             x = jax.nn.silu(linen.RMSNorm(name=f"norm_{i}")(linen.Dense(features=self.config.hidden_size, name=f"dense_{i}")(x)))
-        logits = linen.Dense(features=self.config.stoch * self.config.classes, name="logits")(x)
-        logits = logits.reshape((*logits.shape[:-1], self.config.stoch, self.config.classes))
+        logits = linen.Dense(features=self.config.stoch_size * self.config.classes, name="logits")(x)
+        logits = logits.reshape((*logits.shape[:-1], self.config.stoch_size, self.config.classes))
         return logits
 
     def postprocess(self, logits: jax.Array):
