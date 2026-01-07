@@ -192,8 +192,7 @@ class DreamerV3:
             _, ts, _, _ = state
             return ts
 
-        # ts = jax.jit(_fit)(key, ts, carry, replay_state)
-        ts = _fit(key, ts, carry, replay_state)
+        ts = jax.jit(_fit)(key, ts, carry, replay_state)
 
     def _log_models(self, env: Environment, env_state: EnvState):
         obs_shape = env.observation_space(env_state).shape
