@@ -169,7 +169,7 @@ class DreamerV3:
                 carry_new = DreamerCarry(env_state=env_state, last_obs=obs_new, last_deter=deter_new, last_term=done)
 
                 def log_info(info: Dict[str, Any], global_step: int):
-                    print(f"global_step: {global_step}")
+                    return # TODO: add tensorboard logging here
 
                 jax.debug.callback(log_info, info, ts.global_step)
 
