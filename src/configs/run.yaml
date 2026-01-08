@@ -8,14 +8,17 @@ env:
 dreamerv3:
   num_updates: 100
   num_worlds: 8
+  rollout_length: 128
+  batch_size: 16
+  num_grad_steps: 4
+  replay_length: 8
+  batch_length: 64
   imag_horizon: 16
   max_grad_norm: 2.5
   lr: 2e-2
   weight_decay: 1e-2
-  rollout_length: 32
   replay_buffer:
     max_length: 4096
-
 
   dynamics:
     deter_size: 1024

@@ -4,6 +4,7 @@ from jax import numpy as jnp
 from flax import struct
 from flax.training import train_state
 import optax
+from einops import rearrange
 from omegaconf import DictConfig
 from gymnax.environments.environment import Environment
 from craftax.craftax_classic.envs.craftax_state import EnvState
@@ -146,48 +147,66 @@ class DreamerV3:
         self.replay = ReplayBuffer(self.config.replay_buffer)
         replay_state: ReplayBufferState = self.replay.init(dummy)
 
+        num_samples = self.config.batch_size * self.config.num_grad_steps
+        sample_length = self.config.replay_length + self.config.batch_length
+
+        def _collect_rollout_step(state: Tuple[jax.Array, DreamerState, DreamerCarry], _):
+            key, ts, carry = state
+            deter = carry.last_deter
+            obs = carry.last_obs
+            embed = self.models.encoder.apply(ts.params.encoder, obs)
+            stoch_posterior_dist = self.models.posterior.postprocess(self.models.posterior.apply(ts.params.posterior, deter, embed))
+            key, sample_key, step_key = jax.random.split(key, 3)
+            stoch_posterior = stoch_posterior_dist.sample(seed=sample_key)
+            policy = self.models.actor.postprocess(self.models.actor.apply(ts.params.actor, deter, stoch_posterior))
+            action = policy.sample(seed=sample_key)
+            log_prob = policy.log_prob(action)
+            obs_new, env_state, reward, done, info = jax.vmap(env.step)(jax.random.split(step_key, self.config.num_worlds), carry.env_state, action)
+            deter_new = self.models.dynamics.apply(ts.params.dynamics, deter, stoch_posterior, action)
+            deter_new = jnp.where(done[:, None], self.models.dynamics.get_initial_deter(self.config.num_worlds), deter_new)
+
+            transition = Transition(obs=obs, action=action, log_prob=log_prob, reward=reward, term=done, is_first=carry.last_term)
+            ts = ts.replace(global_step=ts.global_step + self.config.num_worlds)
+            carry_new = DreamerCarry(env_state=env_state, last_obs=obs_new, last_deter=deter_new, last_term=done)
+
+            def log_info(info: Dict[str, Any], global_step: int):
+                return  # TODO: add tensorboard logging here
+
+            jax.debug.callback(log_info, info, ts.global_step)
+
+            return (key, ts, carry_new), transition
+
         def _update_loop(state: Tuple[jax.Array, DreamerState, DreamerCarry, ReplayBufferState], _):
             key, ts, carry, replay_state = state
 
-            def _collect_rollout_step(state: Tuple[jax.Array, DreamerState, DreamerCarry], _):
-                key, ts, carry = state
-                deter = carry.last_deter
-                obs = carry.last_obs
-                embed = self.models.encoder.apply(ts.params.encoder, obs)
-                stoch_posterior_dist = self.models.posterior.postprocess(self.models.posterior.apply(ts.params.posterior, deter, embed))
-                key, sample_key, step_key = jax.random.split(key, 3)
-                stoch_posterior = stoch_posterior_dist.sample(seed=sample_key)
-                policy = self.models.actor.postprocess(self.models.actor.apply(ts.params.actor, deter, stoch_posterior))
-                action = policy.sample(seed=sample_key)
-                log_prob = policy.log_prob(action)
-                obs_new, env_state, reward, done, info = jax.vmap(env.step)(jax.random.split(step_key, self.config.num_worlds), carry.env_state, action)
-                deter_new = self.models.dynamics.apply(ts.params.dynamics, deter, stoch_posterior, action)
-                deter_new = jnp.where(done[:, None], self.models.dynamics.get_initial_deter(self.config.num_worlds), deter_new)
-
-                transition = Transition(obs=obs, action=action, log_prob=log_prob, reward=reward, term=done, is_first=carry.last_term)
-                ts = ts.replace(global_step=ts.global_step + self.config.num_worlds)
-                carry_new = DreamerCarry(env_state=env_state, last_obs=obs_new, last_deter=deter_new, last_term=done)
-
-                def log_info(info: Dict[str, Any], global_step: int):
-                    return # TODO: add tensorboard logging here
-
-                jax.debug.callback(log_info, info, ts.global_step)
-
-                return (key, ts, carry_new), transition
-
-            last_state, rollout = jax.lax.scan(
-                _collect_rollout_step,
-                (key, ts, carry),
-                length=self.config.rollout_length,
-            )
+            last_state, rollout = jax.lax.scan(_collect_rollout_step, (key, ts, carry), length=self.config.rollout_length)
 
             replay_state = self.replay.add(replay_state, rollout)
-
             key, ts, carry = last_state
+
+            def _update_step(state: Tuple[jax.Array, DreamerState], minibatch: Transition):
+                # TODO: will be implemented later
+                return state, None
+
+            key, sample_key = jax.random.split(key)
+            batch = self.replay.sample(replay_state, sample_key, sample_length, num_samples)
+            batch = jax.tree.map(lambda x: rearrange(x, "t (g b) ... -> g t b ...", g=self.config.num_grad_steps, b=self.config.batch_size), batch)
+
+            last_state, metrics = jax.lax.scan(_update_step, (key, ts), batch)
 
             return (key, ts, carry, replay_state), None
 
         def _fit(key: jax.Array, ts: DreamerState, carry: DreamerCarry, replay_state: ReplayBufferState):
+            to_prefill = sample_length - self.config.rollout_length
+
+            def _prefill(key: jax.Array, ts: DreamerState, carry: DreamerCarry, replay_state: ReplayBufferState, to_prefill: int):
+                (key, ts, carry), prefill_rollout = jax.lax.scan(_collect_rollout_step, (key, ts, carry), length=to_prefill)
+                replay_state = self.replay.add(replay_state, prefill_rollout)
+                return key, ts, carry, replay_state
+
+            key, ts, carry, replay_state = jax.lax.cond(
+                to_prefill > 0, lambda: _prefill(key, ts, carry, replay_state, to_prefill), lambda *_: (key, ts, carry, replay_state)
+            )
             state, _ = jax.lax.scan(_update_loop, (key, ts, carry, replay_state), length=self.config.num_updates)
             _, ts, _, _ = state
             return ts
