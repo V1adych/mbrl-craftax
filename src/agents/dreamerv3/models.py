@@ -110,14 +110,13 @@ class Decoder(linen.Module):
         c = features
         for i in range(self.config.cont_layers):
             c = jax.nn.silu(linen.RMSNorm(name=f"cont_norm_{i}")(linen.Dense(features=self.config.hidden_size, name=f"cont_dense_{i}")(c)))
-        cont = linen.Dense(features=1, name="cont_final")(c)
+        cont = linen.Dense(features=1, name="cont_final")(c).squeeze(-1)
         return WorldModelOutputs(obs=obs, reward=reward, cont=cont)
 
     def postprocess(self, raw: WorldModelOutputs):
-        obs = jax.nn.sigmoid(raw.obs)
         reward = symexp(jnp.sum(jax.nn.softmax(raw.reward) * self.bins.value, axis=-1))
         cont = jax.nn.sigmoid(raw.cont)
-        return WorldModelOutputs(obs=obs, reward=reward, cont=cont)
+        return WorldModelOutputs(obs=raw.obs, reward=reward, cont=cont)
 
     def loss(self, pred: WorldModelOutputs, target: WorldModelOutputs):
         obs_loss = 0.5 * jnp.square(pred.obs - target.obs).sum(axis=(-3, -2, -1)).mean()

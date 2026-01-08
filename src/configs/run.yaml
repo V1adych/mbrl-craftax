@@ -17,6 +17,18 @@ dreamerv3:
   max_grad_norm: 2.5
   lr: 2e-2
   weight_decay: 1e-2
+
+  loss:
+    dec_obs: 1.0
+    dec_reward: 1.0
+    dec_cont: 1.0
+    dyn: 1.0
+    rep: 0.1
+    actor: 1.0
+    critic: 1.0
+    entropy: 3e-4
+    free_nats: 1.0
+
   replay_buffer:
     max_length: 4096
 

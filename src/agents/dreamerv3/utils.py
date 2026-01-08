@@ -21,3 +21,6 @@ def two_hot_symlog(x: jax.Array, bins: jax.Array):
     one_hot_low = jax.nn.one_hot(idx, len(bins))
     one_hot_high = jax.nn.one_hot(idx + 1, len(bins))
     return (1.0 - p_high)[..., None] * one_hot_low + p_high[..., None] * one_hot_high
+
+def kl_divergence(probs1: jax.Array, probs2: jax.Array):
+    return jnp.sum(probs1 * (jnp.log(probs1) - jnp.log(probs2)), axis=-1)

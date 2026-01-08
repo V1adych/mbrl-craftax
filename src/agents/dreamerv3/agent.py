@@ -1,4 +1,4 @@
-from typing import Any, Tuple, Dict
+from typing import Any, Tuple, Dict, Optional, Callable
 import jax
 from jax import numpy as jnp
 from flax import struct
@@ -9,8 +9,9 @@ from omegaconf import DictConfig
 from gymnax.environments.environment import Environment
 from craftax.craftax_classic.envs.craftax_state import EnvState
 
-from .models import Dynamics, Encoder, Decoder, Posterior, Prior, Actor, Critic
+from .models import Dynamics, Encoder, Decoder, Posterior, Prior, Actor, Critic, WorldModelOutputs
 from .replay_buffer import Transition, ReplayBuffer, ReplayBufferState
+from .utils import kl_divergence
 
 
 @struct.dataclass
@@ -43,6 +44,18 @@ class DreamerCarry:
     last_term: jax.Array
 
 
+@struct.dataclass
+class Losses:
+    dec_obs: jax.Array
+    dec_reward: jax.Array
+    dec_cont: jax.Array
+    dyn: jax.Array
+    rep: jax.Array
+    actor: jax.Array
+    critic: jax.Array
+    entropy: jax.Array
+
+
 class DreamerState(train_state.TrainState):
     global_step: int
 
@@ -52,6 +65,17 @@ class DreamerV3:
         self.config = config
         self.models: Models = None
         self.replay: ReplayBuffer = None
+
+        self.loss_weights: Losses = Losses(
+            dec_obs=jnp.float32(self.config.loss.dec_obs),
+            dec_reward=jnp.float32(self.config.loss.dec_reward),
+            dec_cont=jnp.float32(self.config.loss.dec_cont),
+            dyn=jnp.float32(self.config.loss.dyn),
+            rep=jnp.float32(self.config.loss.rep),
+            actor=jnp.float32(self.config.loss.actor),
+            critic=jnp.float32(self.config.loss.critic),
+            entropy=jnp.float32(self.config.loss.entropy),
+        )
 
     def _init_models(self, key: jax.Array, env: Environment, env_state: EnvState):
         actspace = env.action_space(env_state).n
@@ -125,14 +149,7 @@ class DreamerV3:
         )
         init_deter = self.models.dynamics.get_initial_deter(self.config.num_worlds)
         init_term = jnp.ones((self.config.num_worlds,), dtype=jnp.bool)
-        ts = DreamerState(
-            step=0,
-            apply_fn=None,
-            params=variables,
-            tx=tx,
-            opt_state=tx.init(variables),
-            global_step=0,
-        )
+        ts = DreamerState(step=0, apply_fn=None, params=variables, tx=tx, opt_state=tx.init(variables), global_step=0)
         carry = DreamerCarry(env_state=env_state, last_obs=obs, last_deter=init_deter, last_term=init_term)
 
         obs_shape = env.observation_space(env_state).shape
@@ -150,6 +167,66 @@ class DreamerV3:
         num_samples = self.config.batch_size * self.config.num_grad_steps
         sample_length = self.config.replay_length + self.config.batch_length
 
+        def _update_loop(state: Tuple[jax.Array, DreamerState, DreamerCarry, ReplayBufferState], _):
+            key, ts, carry, replay_state = state
+            last_state, rollout = self.collect_rollouts(key, ts, carry, env, self.config.rollout_length)
+
+            replay_state = self.replay.add(replay_state, rollout)
+            key, ts, carry = last_state
+
+            def _update_step(state: Tuple[jax.Array, DreamerState], minibatch: Transition):
+                key, ts = state
+                key, observe_key = jax.random.split(key)
+                batch_size = minibatch.obs.shape[1]
+                init_deter = self.models.dynamics.get_initial_deter(batch_size)
+                embed, deter, stoch, stoch_posterior_probs = self.observe(observe_key, ts, minibatch, init_deter)
+
+                dec_pred = self.models.decoder.apply(ts.params.decoder, deter, stoch)
+                dec_target = WorldModelOutputs(obs=minibatch.obs, reward=minibatch.reward, cont=1 - minibatch.term.astype(jnp.float32))
+                losses_dec = self.models.decoder.apply(ts.params.decoder, dec_pred, dec_target, method=self.models.decoder.loss)
+
+                stoch_prior_probs = self.models.prior.postprocess(self.models.prior.apply(ts.params.prior, deter)).probs
+                kl_dyn = kl_divergence(jax.lax.stop_gradient(stoch_posterior_probs), stoch_prior_probs)
+                kl_rep = kl_divergence(stoch_posterior_probs, jax.lax.stop_gradient(stoch_prior_probs))
+                kl_clipfrac = jnp.mean(jnp.float32(kl_dyn < self.config.loss.free_nats))
+                loss_dyn = jnp.maximum(kl_dyn, self.config.loss.free_nats).mean()
+                loss_rep = jnp.maximum(kl_rep, self.config.loss.free_nats).mean()
+
+                return (key, ts), None
+
+            key, sample_key = jax.random.split(key)
+            batch = self.replay.sample(replay_state, sample_key, sample_length, num_samples)
+            batch = jax.tree.map(lambda x: rearrange(x, "t (g b) ... -> g t b ...", g=self.config.num_grad_steps, b=self.config.batch_size), batch)
+
+            last_state, metrics = jax.lax.scan(_update_step, (key, ts), batch)
+
+            return (key, ts, carry, replay_state), None
+
+        def _fit(key: jax.Array, ts: DreamerState, carry: DreamerCarry, replay_state: ReplayBufferState):
+            to_prefill = sample_length - self.config.rollout_length
+
+            def _prefill(key: jax.Array, ts: DreamerState, carry: DreamerCarry, replay_state: ReplayBufferState, to_prefill: int):
+                (key, ts, carry), prefill_rollout = self.collect_rollouts(key, ts, carry, env, to_prefill)
+                replay_state = self.replay.add(replay_state, prefill_rollout)
+                return key, ts, carry, replay_state
+
+            state = (key, ts, carry, replay_state)
+            state = jax.lax.cond(to_prefill > 0, lambda: _prefill(*state, to_prefill), lambda *_: state)
+            state, _ = jax.lax.scan(_update_loop, state, length=self.config.num_updates)
+            _, ts, _, _ = state
+            return ts
+
+        ts = jax.jit(_fit)(key, ts, carry, replay_state)
+
+    def collect_rollouts(
+        self,
+        key: jax.Array,
+        ts: DreamerState,
+        carry: DreamerCarry,
+        env: Environment,
+        length: int,
+        info_callback: Optional[Callable[[Dict[str, Any], jax.Array, int], None]] = None,
+    ):
         def _collect_rollout_step(state: Tuple[jax.Array, DreamerState, DreamerCarry], _):
             key, ts, carry = state
             deter = carry.last_deter
@@ -169,49 +246,27 @@ class DreamerV3:
             ts = ts.replace(global_step=ts.global_step + self.config.num_worlds)
             carry_new = DreamerCarry(env_state=env_state, last_obs=obs_new, last_deter=deter_new, last_term=done)
 
-            def log_info(info: Dict[str, Any], global_step: int):
-                return  # TODO: add tensorboard logging here
-
-            jax.debug.callback(log_info, info, ts.global_step)
+            if info_callback is not None:
+                jax.debug.callback(info_callback, info, done, ts.global_step)
 
             return (key, ts, carry_new), transition
 
-        def _update_loop(state: Tuple[jax.Array, DreamerState, DreamerCarry, ReplayBufferState], _):
-            key, ts, carry, replay_state = state
+        return jax.lax.scan(_collect_rollout_step, (key, ts, carry), length=length)
 
-            last_state, rollout = jax.lax.scan(_collect_rollout_step, (key, ts, carry), length=self.config.rollout_length)
-
-            replay_state = self.replay.add(replay_state, rollout)
-            key, ts, carry = last_state
-
-            def _update_step(state: Tuple[jax.Array, DreamerState], minibatch: Transition):
-                # TODO: will be implemented later
-                return state, None
-
+    def observe(self, key: jax.Array, ts: DreamerState, batch: Transition, init_deter: jax.Array):
+        def _observe_step(state: Tuple[jax.Array, jax.Array], transition: Transition):
+            key, deter_cur = state
+            embed = self.models.encoder.apply(ts.params.encoder, transition.obs)
+            stoch_posterior_dist = self.models.posterior.postprocess(self.models.posterior.apply(ts.params.posterior, deter_cur, embed))
             key, sample_key = jax.random.split(key)
-            batch = self.replay.sample(replay_state, sample_key, sample_length, num_samples)
-            batch = jax.tree.map(lambda x: rearrange(x, "t (g b) ... -> g t b ...", g=self.config.num_grad_steps, b=self.config.batch_size), batch)
+            stoch_posterior_probs = stoch_posterior_dist.probs
+            stoch_posterior = stoch_posterior_dist.sample(seed=sample_key) + stoch_posterior_probs - jax.lax.stop_gradient(stoch_posterior_probs)
+            deter_new = self.models.dynamics.apply(ts.params.dynamics, deter_cur, stoch_posterior, transition.action)
+            deter_new = jnp.where(transition.term[:, None], init_deter, deter_new)
+            return (key, deter_new), (embed, deter_cur, stoch_posterior, stoch_posterior_probs)
 
-            last_state, metrics = jax.lax.scan(_update_step, (key, ts), batch)
-
-            return (key, ts, carry, replay_state), None
-
-        def _fit(key: jax.Array, ts: DreamerState, carry: DreamerCarry, replay_state: ReplayBufferState):
-            to_prefill = sample_length - self.config.rollout_length
-
-            def _prefill(key: jax.Array, ts: DreamerState, carry: DreamerCarry, replay_state: ReplayBufferState, to_prefill: int):
-                (key, ts, carry), prefill_rollout = jax.lax.scan(_collect_rollout_step, (key, ts, carry), length=to_prefill)
-                replay_state = self.replay.add(replay_state, prefill_rollout)
-                return key, ts, carry, replay_state
-
-            key, ts, carry, replay_state = jax.lax.cond(
-                to_prefill > 0, lambda: _prefill(key, ts, carry, replay_state, to_prefill), lambda *_: (key, ts, carry, replay_state)
-            )
-            state, _ = jax.lax.scan(_update_loop, (key, ts, carry, replay_state), length=self.config.num_updates)
-            _, ts, _, _ = state
-            return ts
-
-        ts = jax.jit(_fit)(key, ts, carry, replay_state)
+        _, (embed, deter, stoch, stoch_probs) = jax.lax.scan(_observe_step, (key, init_deter), batch)
+        return embed, deter, stoch, stoch_probs
 
     def _log_models(self, env: Environment, env_state: EnvState):
         obs_shape = env.observation_space(env_state).shape
