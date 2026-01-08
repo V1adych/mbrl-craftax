@@ -179,7 +179,8 @@ class DreamerV3:
                 key, observe_key = jax.random.split(key)
                 batch_size = minibatch.obs.shape[1]
                 init_deter = self.models.dynamics.get_initial_deter(batch_size)
-                embed, deter, stoch, stoch_posterior_probs = self.observe(observe_key, ts, minibatch, init_deter)
+                deter, stoch, stoch_posterior_probs = self.observe(observe_key, ts, minibatch, init_deter)
+                deter, stoch, stoch_posterior_probs, minibatch = jax.tree.map(lambda x: x[self.config.replay_length:], (deter, stoch, stoch_posterior_probs, minibatch))
 
                 dec_pred = self.models.decoder.apply(ts.params.decoder, deter, stoch)
                 dec_target = WorldModelOutputs(obs=minibatch.obs, reward=minibatch.reward, cont=1 - minibatch.term.astype(jnp.float32))
@@ -191,6 +192,7 @@ class DreamerV3:
                 kl_clipfrac = jnp.mean(jnp.float32(kl_dyn < self.config.loss.free_nats))
                 loss_dyn = jnp.maximum(kl_dyn, self.config.loss.free_nats).mean()
                 loss_rep = jnp.maximum(kl_rep, self.config.loss.free_nats).mean()
+
 
                 return (key, ts), None
 
@@ -263,10 +265,12 @@ class DreamerV3:
             stoch_posterior = stoch_posterior_dist.sample(seed=sample_key) + stoch_posterior_probs - jax.lax.stop_gradient(stoch_posterior_probs)
             deter_new = self.models.dynamics.apply(ts.params.dynamics, deter_cur, stoch_posterior, transition.action)
             deter_new = jnp.where(transition.term[:, None], init_deter, deter_new)
-            return (key, deter_new), (embed, deter_cur, stoch_posterior, stoch_posterior_probs)
+            return (key, deter_new), (deter_cur, stoch_posterior, stoch_posterior_probs)
 
-        _, (embed, deter, stoch, stoch_probs) = jax.lax.scan(_observe_step, (key, init_deter), batch)
-        return embed, deter, stoch, stoch_probs
+        _, (deter, stoch, stoch_probs) = jax.lax.scan(_observe_step, (key, init_deter), batch)
+        return deter, stoch, stoch_probs
+
+    def imagine(self): ...
 
     def _log_models(self, env: Environment, env_state: EnvState):
         obs_shape = env.observation_space(env_state).shape
