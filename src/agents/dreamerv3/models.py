@@ -94,6 +94,9 @@ class ObsDecoder(linen.Module):
     def loss(self, pred: jax.Array, target: jax.Array):
         return 0.5 * jnp.square(pred - target).sum(axis=(-3, -2, -1)).mean()
 
+    def predict(self, deter: jax.Array, stoch: jax.Array):
+        return self(deter, stoch)
+
 
 class RewardPredictor(linen.Module):
     config: DictConfig
@@ -117,6 +120,9 @@ class RewardPredictor(linen.Module):
     def postprocess(self, logits: jax.Array):
         return symexp(jnp.sum(jax.nn.softmax(logits) * self.bins.value, axis=-1))
 
+    def predict(self, deter: jax.Array, stoch: jax.Array):
+        return self.postprocess(self(deter, stoch))
+
     def loss(self, pred: jax.Array, target: jax.Array):
         target_two_hot = two_hot_symlog(target, self.bins.value)
         return -jnp.sum(target_two_hot * jax.nn.log_softmax(pred), axis=-1).mean()
@@ -137,6 +143,9 @@ class ContPredictor(linen.Module):
     def postprocess(self, logits: jax.Array):
         return jax.nn.sigmoid(logits)
 
+    def predict(self, deter: jax.Array, stoch: jax.Array):
+        return self.postprocess(self(deter, stoch))
+
     def loss(self, pred: jax.Array, target: jax.Array):
         return -jnp.mean(target * jax.nn.log_sigmoid(pred) + (1.0 - target) * jax.nn.log_sigmoid(-pred))
 
@@ -155,7 +164,10 @@ class Posterior(linen.Module):
 
     def postprocess(self, logits: jax.Array):
         probs = jax.nn.softmax(logits, axis=-1) * (1 - self.config.uniform_frac) + self.config.uniform_frac / logits.shape[-1]
-        return distrax.OneHotCategorical(probs=probs)
+        return distrax.OneHotCategorical(probs=probs, dtype=jnp.float32)
+
+    def predict(self, deter: jax.Array, embed: jax.Array):
+        return self.postprocess(self(deter, embed))
 
 
 class Prior(linen.Module):
@@ -172,10 +184,11 @@ class Prior(linen.Module):
 
     def postprocess(self, logits: jax.Array):
         probs = jax.nn.softmax(logits, axis=-1) * (1 - self.config.uniform_frac) + self.config.uniform_frac / logits.shape[-1]
-        return distrax.OneHotCategorical(probs=probs)
+        return distrax.OneHotCategorical(probs=probs, dtype=jnp.float32)
 
-    def loss(self, pred: jax.Array, target: jax.Array):
-        return -jnp.sum(target * jax.nn.log_softmax(pred), axis=-1).mean()
+    def predict(self, deter: jax.Array):
+        return self.postprocess(self(deter))
+
 
 
 class Actor(linen.Module):
@@ -193,6 +206,9 @@ class Actor(linen.Module):
 
     def postprocess(self, logits: jax.Array):
         return distrax.Categorical(logits=logits)
+
+    def predict(self, deter: jax.Array, stoch: jax.Array):
+        return self.postprocess(self(deter, stoch))
 
 
 class Critic(linen.Module):
@@ -212,6 +228,9 @@ class Critic(linen.Module):
 
     def postprocess(self, raw: jax.Array):
         return symexp(jnp.sum(jax.nn.softmax(raw) * self.bins.value, axis=-1))
+
+    def predict(self, deter: jax.Array, stoch: jax.Array):
+        return self.postprocess(self(deter, stoch))
 
     def loss(self, pred: jax.Array, target: jax.Array):
         target_two_hot = two_hot_symlog(target, self.bins.value)

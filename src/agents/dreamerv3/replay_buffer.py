@@ -8,7 +8,6 @@ from omegaconf import DictConfig
 class Transition:
     obs: jax.Array
     action: jax.Array
-    log_prob: jax.Array
     reward: jax.Array
     term: jax.Array
     reset: jax.Array
@@ -37,13 +36,12 @@ class ReplayBuffer:
 
         obs = _init_from_sample(data.obs, sz, b)
         action = _init_from_sample(data.action, sz, b)
-        log_prob = _init_from_sample(data.log_prob, sz, b)
         reward = _init_from_sample(data.reward, sz, b)
         term = _init_from_sample(data.term, sz, b)
-        is_first = _init_from_sample(data.reset, sz, b)
+        reset = _init_from_sample(data.reset, sz, b)
 
         return ReplayBufferState(
-            data=Transition(obs=obs, action=action, log_prob=log_prob, reward=reward, term=term, reset=is_first),
+            data=Transition(obs=obs, action=action, reward=reward,term=term, reset=reset),
             ptr=jnp.asarray(t, dtype=jnp.int32),
             filled=jnp.asarray(False, dtype=jnp.bool),
         )
@@ -62,7 +60,6 @@ class ReplayBuffer:
         new_data = Transition(
             obs=_write(data.obs, rollout.obs),
             action=_write(data.action, rollout.action),
-            log_prob=_write(data.log_prob, rollout.log_prob),
             reward=_write(data.reward, rollout.reward),
             term=_write(data.term, rollout.term),
             reset=_write(data.reset, rollout.reset),
@@ -103,7 +100,6 @@ class ReplayBuffer:
         out = Transition(
             obs=_gather(data.obs),
             action=_gather(data.action),
-            log_prob=_gather(data.log_prob),
             reward=_gather(data.reward),
             term=_gather(data.term),
             reset=_gather(data.reset),

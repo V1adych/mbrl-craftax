@@ -14,10 +14,20 @@ dreamerv3:
   replay_length: 8
   batch_length: 64
   imag_horizon: 16
-  imag_last_states: 16 
+  imag_last_states: 16
+  gamma: 0.99
+  lam: 0.95
   max_grad_norm: 2.5
   lr: 2e-2
   weight_decay: 1e-2
+
+  ret_norm:
+    tau: 0.99
+    low_quantile: 0.05
+    high_quantile: 0.95
+    low_init: 0.0
+    high_init: 0.0
+    min_scale: 1.0
 
   loss:
     dec_obs: 1.0
@@ -26,7 +36,8 @@ dreamerv3:
     dyn: 1.0
     rep: 0.1
     actor: 1.0
-    critic: 1.0
+    critic_rollout: 0.3
+    critic_imag: 1.0
     entropy: 3e-4
     free_nats: 1.0
 
