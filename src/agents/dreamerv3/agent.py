@@ -9,7 +9,7 @@ from omegaconf import DictConfig
 from gymnax.environments.environment import Environment
 from craftax.craftax_classic.envs.craftax_state import EnvState
 
-from .models import Dynamics, Encoder, Decoder, Posterior, Prior, Actor, Critic, WorldModelOutputs
+from .models import Dynamics, Encoder, ObsDecoder, RewardPredictor, ContPredictor, Posterior, Prior, Actor, Critic
 from .replay_buffer import Transition, ReplayBuffer, ReplayBufferState
 from .utils import kl_divergence
 
@@ -18,7 +18,9 @@ from .utils import kl_divergence
 class Models:
     encoder: Encoder
     dynamics: Dynamics
-    decoder: Decoder
+    obs_decoder: ObsDecoder
+    reward_predictor: RewardPredictor
+    cont_predictor: ContPredictor
     posterior: Posterior
     prior: Prior
     actor: Actor
@@ -29,7 +31,9 @@ class Models:
 class Variables:
     encoder: Any
     dynamics: Any
-    decoder: Any
+    obs_decoder: Any
+    reward_predictor: Any
+    cont_predictor: Any
     posterior: Any
     prior: Any
     actor: Any
@@ -85,14 +89,16 @@ class DreamerV3:
         self.models = Models(
             encoder=Encoder(self.config.encoder),
             dynamics=Dynamics(self.config.dynamics, actspace),
-            decoder=Decoder(self.config.decoder),
+            obs_decoder=ObsDecoder(self.config.obs_decoder),
+            reward_predictor=RewardPredictor(self.config.reward_predictor),
+            cont_predictor=ContPredictor(self.config.cont_predictor),
             posterior=Posterior(self.config.posterior),
             prior=Prior(self.config.prior),
             actor=Actor(self.config.actor, actspace),
             critic=Critic(self.config.critic),
         )
 
-        k_enc, k_post, k_prior, k_act, k_crit, k_dec, k_dyn, k_sample = jax.random.split(key, 8)
+        k_enc, k_post, k_prior, k_act, k_crit, k_obs_dec, k_rew, k_cont, k_dyn, k_sample = jax.random.split(key, 10)
 
         dummy_obs = jnp.zeros((batch_size, *obs_shape))
         params_encoder = self.models.encoder.init(k_enc, dummy_obs)
@@ -108,7 +114,9 @@ class DreamerV3:
 
         params_actor = self.models.actor.init(k_act, deter, stoch)
         params_critic = self.models.critic.init(k_crit, deter, stoch)
-        params_decoder = self.models.decoder.init(k_dec, deter, stoch)
+        params_obs_decoder = self.models.obs_decoder.init(k_obs_dec, deter, stoch)
+        params_reward_predictor = self.models.reward_predictor.init(k_rew, deter, stoch)
+        params_cont_predictor = self.models.cont_predictor.init(k_cont, deter, stoch)
 
         act_dist = self.models.actor.postprocess(self.models.actor.apply(params_actor, deter, stoch))
         act = act_dist.sample(seed=k_sample)
@@ -118,7 +126,9 @@ class DreamerV3:
         return Variables(
             encoder=params_encoder,
             dynamics=params_dynamics,
-            decoder=params_decoder,
+            obs_decoder=params_obs_decoder,
+            reward_predictor=params_reward_predictor,
+            cont_predictor=params_cont_predictor,
             posterior=params_posterior,
             prior=params_prior,
             actor=params_actor,
@@ -159,7 +169,7 @@ class DreamerV3:
             log_prob=jnp.zeros((0, self.config.num_worlds), dtype=jnp.float32),
             reward=jnp.zeros((0, self.config.num_worlds), dtype=jnp.float32),
             term=jnp.zeros((0, self.config.num_worlds), dtype=jnp.bool),
-            is_first=jnp.zeros((0, self.config.num_worlds), dtype=jnp.bool),
+            reset=jnp.zeros((0, self.config.num_worlds), dtype=jnp.bool),
         )
         self.replay = ReplayBuffer(self.config.replay_buffer)
         replay_state: ReplayBufferState = self.replay.init(dummy)
@@ -180,11 +190,21 @@ class DreamerV3:
                 batch_size = minibatch.obs.shape[1]
                 init_deter = self.models.dynamics.get_initial_deter(batch_size)
                 deter, stoch, stoch_posterior_probs = self.observe(observe_key, ts, minibatch, init_deter)
-                deter, stoch, stoch_posterior_probs, minibatch = jax.tree.map(lambda x: x[self.config.replay_length:], (deter, stoch, stoch_posterior_probs, minibatch))
+                deter, stoch, stoch_posterior_probs, minibatch = jax.tree.map(
+                    lambda x: x[self.config.replay_length :], (deter, stoch, stoch_posterior_probs, minibatch)
+                )
 
-                dec_pred = self.models.decoder.apply(ts.params.decoder, deter, stoch)
-                dec_target = WorldModelOutputs(obs=minibatch.obs, reward=minibatch.reward, cont=1 - minibatch.term.astype(jnp.float32))
-                losses_dec = self.models.decoder.apply(ts.params.decoder, dec_pred, dec_target, method=self.models.decoder.loss)
+                obs_pred = self.models.obs_decoder.apply(ts.params.obs_decoder, deter, stoch)
+                loss_obs = self.models.obs_decoder.apply(ts.params.obs_decoder, obs_pred, minibatch.obs, method=self.models.obs_decoder.loss)
+
+                reward_logits = self.models.reward_predictor.apply(ts.params.reward_predictor, deter, stoch)
+                loss_reward = self.models.reward_predictor.apply(
+                    ts.params.reward_predictor, reward_logits, minibatch.reward, method=self.models.reward_predictor.loss
+                )
+
+                cont_logits = self.models.cont_predictor.apply(ts.params.cont_predictor, deter, stoch)
+                cont_target = 1.0 - minibatch.term.astype(jnp.float32)
+                loss_cont = self.models.cont_predictor.apply(ts.params.cont_predictor, cont_logits, cont_target, method=self.models.cont_predictor.loss)
 
                 stoch_prior_probs = self.models.prior.postprocess(self.models.prior.apply(ts.params.prior, deter)).probs
                 kl_dyn = kl_divergence(jax.lax.stop_gradient(stoch_posterior_probs), stoch_prior_probs)
@@ -193,6 +213,7 @@ class DreamerV3:
                 loss_dyn = jnp.maximum(kl_dyn, self.config.loss.free_nats).mean()
                 loss_rep = jnp.maximum(kl_rep, self.config.loss.free_nats).mean()
 
+                imag_init = jax.tree.map(lambda x: rearrange(x[-self.config.imag_last_states :], "t b ... -> (t b) ..."), (deter, stoch))
 
                 return (key, ts), None
 
@@ -244,7 +265,7 @@ class DreamerV3:
             deter_new = self.models.dynamics.apply(ts.params.dynamics, deter, stoch_posterior, action)
             deter_new = jnp.where(done[:, None], self.models.dynamics.get_initial_deter(self.config.num_worlds), deter_new)
 
-            transition = Transition(obs=obs, action=action, log_prob=log_prob, reward=reward, term=done, is_first=carry.last_term)
+            transition = Transition(obs=obs, action=action, log_prob=log_prob, reward=reward, term=done, reset=carry.last_term)
             ts = ts.replace(global_step=ts.global_step + self.config.num_worlds)
             carry_new = DreamerCarry(env_state=env_state, last_obs=obs_new, last_deter=deter_new, last_term=done)
 
@@ -287,5 +308,7 @@ class DreamerV3:
         print(self.models.prior.tabulate(tab_key, deter, compute_flops=True, compute_vjp_flops=True))
         print(self.models.actor.tabulate(tab_key, deter, stoch, compute_flops=True, compute_vjp_flops=True))
         print(self.models.critic.tabulate(tab_key, deter, stoch, compute_flops=True, compute_vjp_flops=True))
-        print(self.models.decoder.tabulate(tab_key, deter, stoch, compute_flops=True, compute_vjp_flops=True))
+        print(self.models.obs_decoder.tabulate(tab_key, deter, stoch, compute_flops=True, compute_vjp_flops=True))
+        print(self.models.reward_predictor.tabulate(tab_key, deter, stoch, compute_flops=True, compute_vjp_flops=True))
+        print(self.models.cont_predictor.tabulate(tab_key, deter, stoch, compute_flops=True, compute_vjp_flops=True))
         print(self.models.dynamics.tabulate(tab_key, deter, stoch, act, compute_flops=True, compute_vjp_flops=True))

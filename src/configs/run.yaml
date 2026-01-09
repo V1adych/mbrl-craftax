@@ -14,6 +14,7 @@ dreamerv3:
   replay_length: 8
   batch_length: 64
   imag_horizon: 16
+  imag_last_states: 16 
   max_grad_norm: 2.5
   lr: 2e-2
   weight_decay: 1e-2
@@ -45,15 +46,21 @@ dreamerv3:
     mults: [2, 3, 4, 4]
     hidden_size: 256
 
-  decoder:
+  obs_decoder:
     depth: 32
     mults: [2, 3, 4, 4]
     hidden_size: 256
-    reward_layers: 2
+
+  reward_predictor:
+    hidden_size: 256
+    num_layers: 2
     num_bins: 255
     min_val: -1000.0
     max_val: 1000.0
-    cont_layers: 2
+
+  cont_predictor:
+    hidden_size: 256
+    num_layers: 2
 
   posterior:
     num_layers: 2

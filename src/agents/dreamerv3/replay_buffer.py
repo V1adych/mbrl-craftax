@@ -11,7 +11,7 @@ class Transition:
     log_prob: jax.Array
     reward: jax.Array
     term: jax.Array
-    is_first: jax.Array
+    reset: jax.Array
 
 
 @struct.dataclass
@@ -40,10 +40,10 @@ class ReplayBuffer:
         log_prob = _init_from_sample(data.log_prob, sz, b)
         reward = _init_from_sample(data.reward, sz, b)
         term = _init_from_sample(data.term, sz, b)
-        is_first = _init_from_sample(data.is_first, sz, b)
+        is_first = _init_from_sample(data.reset, sz, b)
 
         return ReplayBufferState(
-            data=Transition(obs=obs, action=action, log_prob=log_prob, reward=reward, term=term, is_first=is_first),
+            data=Transition(obs=obs, action=action, log_prob=log_prob, reward=reward, term=term, reset=is_first),
             ptr=jnp.asarray(t, dtype=jnp.int32),
             filled=jnp.asarray(False, dtype=jnp.bool),
         )
@@ -65,7 +65,7 @@ class ReplayBuffer:
             log_prob=_write(data.log_prob, rollout.log_prob),
             reward=_write(data.reward, rollout.reward),
             term=_write(data.term, rollout.term),
-            is_first=_write(data.is_first, rollout.is_first),
+            reset=_write(data.reset, rollout.reset),
         )
 
         wrote_past_end = (ptr + jnp.asarray(t, dtype=jnp.int32)) >= jnp.asarray(sz, dtype=jnp.int32)
@@ -106,11 +106,11 @@ class ReplayBuffer:
             log_prob=_gather(data.log_prob),
             reward=_gather(data.reward),
             term=_gather(data.term),
-            is_first=_gather(data.is_first),
+            reset=_gather(data.reset),
         )
 
         boundary_first = time_idx == ptr
-        out = out.replace(is_first=jnp.logical_or(out.is_first, boundary_first))
+        out = out.replace(reset=jnp.logical_or(out.reset, boundary_first))
 
         ptrm1 = (ptr - jnp.asarray(1, dtype=jnp.int32)) % sz_i32
         boundary_term = time_idx == ptrm1

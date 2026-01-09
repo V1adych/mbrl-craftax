@@ -1,16 +1,9 @@
 import jax
 from jax import numpy as jnp
-from flax import linen, struct
+from flax import linen
 import distrax
 from omegaconf import DictConfig
 from .utils import symexp, two_hot_symlog
-
-
-@struct.dataclass
-class WorldModelOutputs:
-    obs: jax.Array
-    reward: jax.Array
-    cont: jax.Array
 
 
 class BlockDense(linen.Module):
@@ -81,13 +74,8 @@ class Encoder(linen.Module):
         return x
 
 
-class Decoder(linen.Module):
+class ObsDecoder(linen.Module):
     config: DictConfig
-
-    def setup(self):
-        self.bins = self.variable(
-            "state", "bins", lambda: jnp.linspace(symexp(self.config.min_val), symexp(self.config.max_val), self.config.num_bins)
-        )
 
     @linen.compact
     def __call__(self, deter: jax.Array, stoch: jax.Array):
@@ -101,29 +89,56 @@ class Decoder(linen.Module):
             x = linen.ConvTranspose(features=self.config.depth * mult, kernel_size=(3, 3), strides=(2, 2), padding="VALID", name=f"obs_conv_{i}")(x)
             x = jax.nn.silu(linen.RMSNorm(name=f"obs_norm_{i}")(x))
         obs = linen.ConvTranspose(features=3, kernel_size=(3, 3), strides=(2, 2), padding="VALID", name="obs_final")(x)
+        return obs
 
-        r = features
-        for i in range(self.config.reward_layers):
-            r = jax.nn.silu(linen.RMSNorm(name=f"reward_norm_{i}")(linen.Dense(features=self.config.hidden_size, name=f"reward_dense_{i}")(r)))
-        reward = linen.Dense(features=self.config.num_bins, name="reward_final")(r)
+    def loss(self, pred: jax.Array, target: jax.Array):
+        return 0.5 * jnp.square(pred - target).sum(axis=(-3, -2, -1)).mean()
 
-        c = features
-        for i in range(self.config.cont_layers):
-            c = jax.nn.silu(linen.RMSNorm(name=f"cont_norm_{i}")(linen.Dense(features=self.config.hidden_size, name=f"cont_dense_{i}")(c)))
-        cont = linen.Dense(features=1, name="cont_final")(c).squeeze(-1)
-        return WorldModelOutputs(obs=obs, reward=reward, cont=cont)
 
-    def postprocess(self, raw: WorldModelOutputs):
-        reward = symexp(jnp.sum(jax.nn.softmax(raw.reward) * self.bins.value, axis=-1))
-        cont = jax.nn.sigmoid(raw.cont)
-        return WorldModelOutputs(obs=raw.obs, reward=reward, cont=cont)
+class RewardPredictor(linen.Module):
+    config: DictConfig
 
-    def loss(self, pred: WorldModelOutputs, target: WorldModelOutputs):
-        obs_loss = 0.5 * jnp.square(pred.obs - target.obs).sum(axis=(-3, -2, -1)).mean()
-        reward_target = two_hot_symlog(target.reward, self.bins.value)
-        reward_loss = -jnp.sum(reward_target * jax.nn.log_softmax(pred.reward), axis=-1).mean()
-        cont_loss = -jnp.sum(target.cont * jax.nn.log_sigmoid(pred.cont) + (1.0 - target.cont) * jax.nn.log_sigmoid(-pred.cont), axis=-1).mean()
-        return WorldModelOutputs(obs=obs_loss, reward=reward_loss, cont=cont_loss)
+    def setup(self):
+        self.bins = self.variable(
+            "state",
+            "bins",
+            lambda: jnp.linspace(symexp(self.config.min_val), symexp(self.config.max_val), self.config.num_bins),
+        )
+
+    @linen.compact
+    def __call__(self, deter: jax.Array, stoch: jax.Array):
+        stoch = stoch.reshape((*stoch.shape[:-2], -1))
+        x = jnp.concat([deter, stoch], axis=-1)
+        for i in range(self.config.num_layers):
+            x = jax.nn.silu(linen.RMSNorm(name=f"norm_{i}")(linen.Dense(features=self.config.hidden_size, name=f"dense_{i}")(x)))
+        logits = linen.Dense(features=self.config.num_bins, name="logits")(x)
+        return logits
+
+    def postprocess(self, logits: jax.Array):
+        return symexp(jnp.sum(jax.nn.softmax(logits) * self.bins.value, axis=-1))
+
+    def loss(self, pred: jax.Array, target: jax.Array):
+        target_two_hot = two_hot_symlog(target, self.bins.value)
+        return -jnp.sum(target_two_hot * jax.nn.log_softmax(pred), axis=-1).mean()
+
+
+class ContPredictor(linen.Module):
+    config: DictConfig
+
+    @linen.compact
+    def __call__(self, deter: jax.Array, stoch: jax.Array):
+        stoch = stoch.reshape((*stoch.shape[:-2], -1))
+        x = jnp.concat([deter, stoch], axis=-1)
+        for i in range(self.config.num_layers):
+            x = jax.nn.silu(linen.RMSNorm(name=f"norm_{i}")(linen.Dense(features=self.config.hidden_size, name=f"dense_{i}")(x)))
+        logits = linen.Dense(features=1, name="logits")(x).squeeze(-1)
+        return logits
+
+    def postprocess(self, logits: jax.Array):
+        return jax.nn.sigmoid(logits)
+
+    def loss(self, pred: jax.Array, target: jax.Array):
+        return -jnp.mean(target * jax.nn.log_sigmoid(pred) + (1.0 - target) * jax.nn.log_sigmoid(-pred))
 
 
 class Posterior(linen.Module):
@@ -184,9 +199,7 @@ class Critic(linen.Module):
     config: DictConfig
 
     def setup(self):
-        self.bins = self.variable(
-            "state", "bins", lambda: jnp.linspace(symexp(self.config.min_val), symexp(self.config.max_val), self.config.num_bins)
-        )
+        self.bins = self.variable("state", "bins", lambda: jnp.linspace(symexp(self.config.min_val), symexp(self.config.max_val), self.config.num_bins))
 
     @linen.compact
     def __call__(self, deter: jax.Array, stoch: jax.Array):
