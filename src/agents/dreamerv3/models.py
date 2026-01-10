@@ -3,7 +3,7 @@ from jax import numpy as jnp
 from flax import linen
 import distrax
 from omegaconf import DictConfig
-from .utils import symexp, two_hot_symlog
+from .utils import symexp, symlog, two_hot_symlog
 
 
 class BlockDense(linen.Module):
@@ -102,11 +102,7 @@ class RewardPredictor(linen.Module):
     config: DictConfig
 
     def setup(self):
-        self.bins = self.variable(
-            "state",
-            "bins",
-            lambda: jnp.linspace(symexp(self.config.min_val), symexp(self.config.max_val), self.config.num_bins),
-        )
+        self.bins = self.variable("state", "bins", lambda: jnp.linspace(symlog(self.config.min_val), symlog(self.config.max_val), self.config.num_bins))
 
     @linen.compact
     def __call__(self, deter: jax.Array, stoch: jax.Array):
@@ -190,7 +186,6 @@ class Prior(linen.Module):
         return self.postprocess(self(deter))
 
 
-
 class Actor(linen.Module):
     config: DictConfig
     act_space: int
@@ -215,7 +210,7 @@ class Critic(linen.Module):
     config: DictConfig
 
     def setup(self):
-        self.bins = self.variable("state", "bins", lambda: jnp.linspace(symexp(self.config.min_val), symexp(self.config.max_val), self.config.num_bins))
+        self.bins = self.variable("state", "bins", lambda: jnp.linspace(symlog(self.config.min_val), symlog(self.config.max_val), self.config.num_bins))
 
     @linen.compact
     def __call__(self, deter: jax.Array, stoch: jax.Array):
