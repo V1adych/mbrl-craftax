@@ -244,7 +244,7 @@ class DreamerV3:
             _, ts, _, _ = state
             return ts
 
-        ts = _fit(key, ts, carry, replay_state)
+        ts = jax.jit(_fit)(key, ts, carry, replay_state)
 
     def update(self, key: jax.Array, ts: DreamerState, minibatch: Transition):
         key, observe_key = jax.random.split(key)
