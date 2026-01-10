@@ -91,6 +91,7 @@ dreamerv3:
   actor:
     num_layers: 2
     hidden_size: 256
+    uniform_frac: 0.01
 
   critic:
     num_layers: 2

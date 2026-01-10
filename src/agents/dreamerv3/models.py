@@ -200,7 +200,8 @@ class Actor(linen.Module):
         return logits
 
     def postprocess(self, logits: jax.Array):
-        return distrax.Categorical(logits=logits)
+        probs = jax.nn.softmax(logits, axis=-1) * (1 - self.config.uniform_frac) + self.config.uniform_frac / logits.shape[-1]
+        return distrax.Categorical(probs=probs)
 
     def predict(self, deter: jax.Array, stoch: jax.Array):
         return self.postprocess(self(deter, stoch))
@@ -227,6 +228,6 @@ class Critic(linen.Module):
     def predict(self, deter: jax.Array, stoch: jax.Array):
         return self.postprocess(self(deter, stoch))
 
-    def loss(self, pred: jax.Array, target: jax.Array):
+    def loss(self, pred: jax.Array, target: jax.Array, weight: jax.Array):
         target_two_hot = two_hot_symlog(target, self.bins.value)
-        return -jnp.sum(target_two_hot * jax.nn.log_softmax(pred), axis=-1).mean()
+        return -jnp.mean(weight * jnp.sum(target_two_hot * jax.nn.log_softmax(pred), axis=-1))

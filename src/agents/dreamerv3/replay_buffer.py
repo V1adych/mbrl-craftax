@@ -8,8 +8,7 @@ from omegaconf import DictConfig
 class Transition:
     obs: jax.Array
     action: jax.Array
-    reward: jax.Array
-    term: jax.Array
+    reward_prev: jax.Array
     reset: jax.Array
 
 
@@ -36,12 +35,11 @@ class ReplayBuffer:
 
         obs = _init_from_sample(data.obs, sz, b)
         action = _init_from_sample(data.action, sz, b)
-        reward = _init_from_sample(data.reward, sz, b)
-        term = _init_from_sample(data.term, sz, b)
+        reward_prev = _init_from_sample(data.reward_prev, sz, b)
         reset = _init_from_sample(data.reset, sz, b)
 
         return ReplayBufferState(
-            data=Transition(obs=obs, action=action, reward=reward,term=term, reset=reset),
+            data=Transition(obs=obs, action=action, reward_prev=reward_prev, reset=reset),
             ptr=jnp.asarray(t, dtype=jnp.int32),
             filled=jnp.asarray(False, dtype=jnp.bool),
         )
@@ -60,8 +58,7 @@ class ReplayBuffer:
         new_data = Transition(
             obs=_write(data.obs, rollout.obs),
             action=_write(data.action, rollout.action),
-            reward=_write(data.reward, rollout.reward),
-            term=_write(data.term, rollout.term),
+            reward_prev=_write(data.reward_prev, rollout.reward_prev),
             reset=_write(data.reset, rollout.reset),
         )
 
@@ -100,15 +97,11 @@ class ReplayBuffer:
         out = Transition(
             obs=_gather(data.obs),
             action=_gather(data.action),
-            reward=_gather(data.reward),
-            term=_gather(data.term),
+            reward_prev=_gather(data.reward_prev),
             reset=_gather(data.reset),
         )
 
-        boundary_first = time_idx == ptr
-        out = out.replace(reset=jnp.logical_or(out.reset, boundary_first))
+        boundary_reset = time_idx == ptr
+        out = out.replace(reset=jnp.logical_or(out.reset, boundary_reset))
 
-        ptrm1 = (ptr - jnp.asarray(1, dtype=jnp.int32)) % sz_i32
-        boundary_term = time_idx == ptrm1
-        out = out.replace(term=jnp.logical_or(out.term, boundary_term))
         return out
