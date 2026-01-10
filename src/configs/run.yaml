@@ -17,6 +17,7 @@ dreamerv3:
   imag_last_states: 16
   gamma: 0.99
   lam: 0.95
+  critic_tau: 0.98
   max_grad_norm: 2.5
   lr: 2e-2
   weight_decay: 1e-2

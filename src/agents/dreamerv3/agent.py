@@ -1,4 +1,6 @@
+from __future__ import annotations
 from typing import Any, Tuple, Dict, Optional, Callable
+import operator
 import jax
 from jax import numpy as jnp
 from flax import struct
@@ -26,11 +28,10 @@ class Models:
     prior: Prior
     actor: Actor
     critic: Critic
-    ret_norm: RetNorm
 
 
 @struct.dataclass
-class Variables:
+class Params:
     encoder: Any
     dynamics: Any
     obs_decoder: Any
@@ -40,7 +41,6 @@ class Variables:
     prior: Any
     actor: Any
     critic: Any
-    ret_norm: Any
 
 
 @struct.dataclass
@@ -76,6 +76,18 @@ class Losses:
 
 class DreamerState(train_state.TrainState):
     global_step: int
+    slow_critic_params: Any
+    ret_norm_params: Any
+
+    @classmethod
+    def create(cls, *, apply_fn: Optional[Callable] = None, params: Any, tx: optax.GradientTransformation, **kwargs) -> DreamerState:
+        opt_state = tx.init(params)
+        return cls(step=0, apply_fn=apply_fn, params=params, tx=tx, opt_state=opt_state, **kwargs)
+
+    def apply_gradients(self, *, grads: Any, **kwargs) -> DreamerState:
+        updates, new_opt_state = self.tx.update(grads, self.opt_state, self.params)
+        new_params = optax.apply_updates(self.params, updates)
+        return self.replace(step=self.step + 1, params=new_params, opt_state=new_opt_state, **kwargs)
 
 
 class DreamerV3:
@@ -83,6 +95,7 @@ class DreamerV3:
         self.config = config
         self.models: Models = None
         self.replay: ReplayBuffer = None
+        self.ret_norm = RetNorm(self.config.ret_norm)
 
         self.loss_weights: Losses = Losses(
             obs=jnp.float32(self.config.loss.dec_obs),
@@ -111,7 +124,6 @@ class DreamerV3:
             prior=Prior(self.config.prior),
             actor=Actor(self.config.actor, actspace),
             critic=Critic(self.config.critic),
-            ret_norm=RetNorm(self.config.ret_norm),
         )
 
         k_enc, k_post, k_prior, k_act, k_crit, k_obs_dec, k_rew, k_cont, k_dyn, k_sample = jax.random.split(key, 10)
@@ -138,20 +150,23 @@ class DreamerV3:
         act = act_dist.sample(seed=k_sample)
 
         params_dynamics = self.models.dynamics.init(k_dyn, deter, stoch, act)
-        params_ret_norm = self.models.ret_norm.init(jax.random.key(0), jnp.zeros((1,), dtype=jnp.float32))
+        params_ret_norm = self.ret_norm.init(jax.random.key(0), jnp.zeros((1,), dtype=jnp.float32))
 
-        return Variables(
-            encoder=params_encoder,
-            dynamics=params_dynamics,
-            obs_decoder=params_obs_decoder,
-            reward_predictor=params_reward_predictor,
-            cont_predictor=params_cont_predictor,
-            posterior=params_posterior,
-            prior=params_prior,
-            actor=params_actor,
-            critic=params_critic,
-            ret_norm=params_ret_norm,
-        ), params_critic
+        return (
+            Params(
+                encoder=params_encoder,
+                dynamics=params_dynamics,
+                obs_decoder=params_obs_decoder,
+                reward_predictor=params_reward_predictor,
+                cont_predictor=params_cont_predictor,
+                posterior=params_posterior,
+                prior=params_prior,
+                actor=params_actor,
+                critic=params_critic,
+            ),
+            params_critic,
+            params_ret_norm,
+        )
 
     def fit(self, key: jax.Array, env: Environment):
         reset_fn = jax.vmap(env.reset)
@@ -159,7 +174,7 @@ class DreamerV3:
         obs, env_state = reset_fn(jnp.array(reset_keys))
 
         key, init_key = jax.random.split(key)
-        variables, slow_critic_params = self._init_models(init_key, env, env_state)
+        variables, slow_critic_params, ret_norm_params = self._init_models(init_key, env, env_state)
         self._log_models(env, env_state)
 
         def _is_params(path, _):
@@ -177,7 +192,7 @@ class DreamerV3:
         )
         init_deter = self.models.dynamics.get_initial_deter(self.config.num_worlds)
         init_term = jnp.ones((self.config.num_worlds,), dtype=jnp.bool)
-        ts = DreamerState(step=0, apply_fn=None, params=variables, tx=tx, opt_state=tx.init(variables), global_step=0)
+        ts = DreamerState.create(params=variables, tx=tx, global_step=0, slow_critic_params=slow_critic_params, ret_norm_params=ret_norm_params)
         carry = DreamerCarry(env_state=env_state, last_obs=obs, last_deter=init_deter, last_term=init_term)
 
         obs_shape = env.observation_space(env_state).shape
@@ -196,97 +211,22 @@ class DreamerV3:
 
         def _update_loop(state: Tuple[jax.Array, DreamerState, DreamerCarry, ReplayBufferState], _):
             key, ts, carry, replay_state = state
-            last_state, rollout = self.collect_rollouts(key, ts, carry, env, self.config.rollout_length)
+            (key, ts, carry), rollout = self.collect_rollouts(key, ts, carry, env, self.config.rollout_length)
 
             replay_state = self.replay.add(replay_state, rollout)
-            key, ts, carry = last_state
-
-            def _update_step(state: Tuple[jax.Array, DreamerState], minibatch: Transition):
-                key, ts = state
-                key, observe_key = jax.random.split(key)
-                batch_size = minibatch.obs.shape[1]
-                init_deter = self.models.dynamics.get_initial_deter(batch_size)
-                deter, stoch, stoch_posterior_probs = self.observe(observe_key, ts, minibatch, init_deter)
-                deter, stoch, stoch_posterior_probs, minibatch = jax.tree.map(
-                    lambda x: x[self.config.replay_length :], (deter, stoch, stoch_posterior_probs, minibatch)
-                )
-
-                obs_pred = self.models.obs_decoder.apply(ts.params.obs_decoder, deter, stoch)
-                loss_obs = self.models.obs_decoder.apply(ts.params.obs_decoder, obs_pred, minibatch.obs, method=self.models.obs_decoder.loss)
-
-                reward_logits = self.models.reward_predictor.apply(ts.params.reward_predictor, deter, stoch)
-                loss_reward = self.models.reward_predictor.apply(
-                    ts.params.reward_predictor, reward_logits, minibatch.reward, method=self.models.reward_predictor.loss
-                )
-
-                cont_logits = self.models.cont_predictor.apply(ts.params.cont_predictor, deter, stoch)
-                cont_target = 1.0 - minibatch.term.astype(jnp.float32)
-                loss_cont = self.models.cont_predictor.apply(ts.params.cont_predictor, cont_logits, cont_target, method=self.models.cont_predictor.loss)
-
-                stoch_prior_probs = self.models.prior.apply(ts.params.prior, deter, method=self.models.prior.predict).probs
-                kl_dyn = kl_divergence(jax.lax.stop_gradient(stoch_posterior_probs), stoch_prior_probs)
-                kl_rep = kl_divergence(stoch_posterior_probs, jax.lax.stop_gradient(stoch_prior_probs))
-                kl_clipfrac = jnp.mean(jnp.float32(kl_dyn < self.config.loss.free_nats))
-                loss_dyn = jnp.maximum(kl_dyn, self.config.loss.free_nats).mean()
-                loss_rep = jnp.maximum(kl_rep, self.config.loss.free_nats).mean()
-
-                imag_init = jax.tree.map(lambda x: rearrange(x[-self.config.imag_last_states :], "t b ... -> (t b) ..."), (deter, stoch))
-
-                (deter_last, stoch_last), imag_rollout = jax.lax.stop_gradient(self.imagine(key, ts, imag_init, self.config.imag_horizon + 1))
-
-                target_next_values_rollout = self.models.critic.apply(slow_critic_params, deter[1:], stoch[1:], method=self.models.critic.predict)
-                target_values_imag = self.models.critic.apply(slow_critic_params, imag_rollout.deter, imag_rollout.stoch, method=self.models.critic.predict)
-                target_values_imag_last = self.models.critic.apply(slow_critic_params, deter_last, stoch_last, method=self.models.critic.predict)
-
-                gamma = self.config.gamma
-                lam = self.config.lam
-                cont = jnp.float32(1.0 - minibatch.term[:-2])
-                returns_rollout = jax.lax.stop_gradient(
-                    self._compute_lambda_returns(minibatch.reward[:-2], cont, target_next_values_rollout[:-1], target_next_values_rollout[-1], gamma, lam)
-                )
-                returns_imag = jax.lax.stop_gradient(
-                    self._compute_lambda_returns(
-                        imag_rollout.reward[:-1], imag_rollout.cont[:-1], target_values_imag[1:], target_values_imag_last, self.config.gamma, self.config.lam
-                    )
-                )
-
-                value_pred_rollout_symlog = self.models.critic.apply(ts.params.critic, deter[:-2], stoch[:-2])
-                loss_critic_rollout = self.models.critic.apply(ts.params.critic, value_pred_rollout_symlog, returns_rollout, method=self.models.critic.loss)
-
-                value_pred_imag_symlog = self.models.critic.apply(ts.params.critic, imag_rollout.deter[:-1], imag_rollout.stoch[:-1])
-                loss_critic_imag = self.models.critic.apply(ts.params.critic, value_pred_imag_symlog, returns_imag, method=self.models.critic.loss)
-                returns_imag = self.models.ret_norm.apply(ts.params.ret_norm, returns_imag)
-
-                ts = ts.replace(
-                    params=ts.params.replace(
-                        ret_norm=self.models.ret_norm.apply(ts.params.ret_norm, returns_imag, method=self.models.ret_norm.update, mutable=["state"])[1]
-                    )
-                )
-                policy = self.models.actor.apply(ts.params.actor, imag_rollout.deter[:-1], imag_rollout.stoch[:-1], method=self.models.actor.predict)
-                log_prob = policy.log_prob(imag_rollout.action[:-1])
-                adv = jax.lax.stop_gradient(self.models.ret_norm.apply(ts.params.ret_norm, returns_imag - target_values_imag[:-1]))
-                loss_actor = -jnp.mean(adv * log_prob)
-                loss_entropy = -jnp.mean(policy.entropy())
-
-                losses = Losses(
-                    obs=loss_obs,
-                    reward=loss_reward,
-                    cont=loss_cont,
-                    dyn=loss_dyn,
-                    rep=loss_rep,
-                    actor=loss_actor,
-                    critic_imag=loss_critic_imag,
-                    critic_rollout=loss_critic_rollout,
-                    entropy=loss_entropy,
-                )
-
-                return (key, ts), None
 
             key, sample_key = jax.random.split(key)
             batch = self.replay.sample(replay_state, sample_key, sample_length, num_samples)
             batch = jax.tree.map(lambda x: rearrange(x, "t (g b) ... -> g t b ...", g=self.config.num_grad_steps, b=self.config.batch_size), batch)
 
-            last_state, metrics = jax.lax.scan(_update_step, (key, ts), batch)
+            def _update(carry: Tuple[jax.Array, DreamerState], minibatch: Transition):
+                key, ts = carry
+                key, update_key = jax.random.split(key)
+                ts = self.update(update_key, ts, minibatch)
+                return (key, ts), None
+
+            (key, ts), metrics = jax.lax.scan(_update, (key, ts), batch)
+            ts = ts.replace(slow_critic_params=self._update_slow_critic(ts.slow_critic_params, ts.params.critic))
 
             return (key, ts, carry, replay_state), None
 
@@ -304,7 +244,87 @@ class DreamerV3:
             _, ts, _, _ = state
             return ts
 
-        ts = jax.jit(_fit)(key, ts, carry, replay_state)
+        ts = _fit(key, ts, carry, replay_state)
+
+    def update(self, key: jax.Array, ts: DreamerState, minibatch: Transition):
+        key, observe_key = jax.random.split(key)
+
+        def _loss_fn(params: Params, minibatch: Transition, slow_critic_params: Any, ret_norm_params: Any):
+            batch_size = minibatch.obs.shape[1]
+            init_deter = self.models.dynamics.get_initial_deter(batch_size)
+            deter, stoch, stoch_posterior_probs = self.observe(observe_key, params, minibatch, init_deter)
+            deter, stoch, stoch_posterior_probs, minibatch = jax.tree.map(
+                lambda x: x[self.config.replay_length :], (deter, stoch, stoch_posterior_probs, minibatch)
+            )
+
+            obs_pred = self.models.obs_decoder.apply(params.obs_decoder, deter, stoch)
+            loss_obs = self.models.obs_decoder.apply(params.obs_decoder, obs_pred, minibatch.obs, method=self.models.obs_decoder.loss)
+
+            reward_logits = self.models.reward_predictor.apply(params.reward_predictor, deter, stoch)
+            loss_reward = self.models.reward_predictor.apply(params.reward_predictor, reward_logits, minibatch.reward, method=self.models.reward_predictor.loss)
+
+            cont_logits = self.models.cont_predictor.apply(params.cont_predictor, deter, stoch)
+            cont_target = 1.0 - minibatch.term.astype(jnp.float32)
+            loss_cont = self.models.cont_predictor.apply(params.cont_predictor, cont_logits, cont_target, method=self.models.cont_predictor.loss)
+
+            stoch_prior_probs = self.models.prior.apply(params.prior, deter, method=self.models.prior.predict).probs
+            kl_dyn = kl_divergence(jax.lax.stop_gradient(stoch_posterior_probs), stoch_prior_probs)
+            kl_rep = kl_divergence(stoch_posterior_probs, jax.lax.stop_gradient(stoch_prior_probs))
+            kl_clipfrac = jnp.mean(jnp.float32(kl_dyn < self.config.loss.free_nats))
+            loss_dyn = jnp.maximum(kl_dyn, self.config.loss.free_nats).mean()
+            loss_rep = jnp.maximum(kl_rep, self.config.loss.free_nats).mean()
+
+            imag_init = jax.tree.map(lambda x: rearrange(x[-self.config.imag_last_states :], "t b ... -> (t b) ..."), (deter, stoch))
+
+            (deter_last, stoch_last), imag_rollout = jax.lax.stop_gradient(self.imagine(key, params, imag_init, self.config.imag_horizon + 1))
+
+            target_next_values_rollout = self.models.critic.apply(slow_critic_params, deter[1:], stoch[1:], method=self.models.critic.predict)
+            target_values_imag = self.models.critic.apply(slow_critic_params, imag_rollout.deter, imag_rollout.stoch, method=self.models.critic.predict)
+            target_values_imag_last = self.models.critic.apply(slow_critic_params, deter_last, stoch_last, method=self.models.critic.predict)
+
+            gamma = self.config.gamma
+            lam = self.config.lam
+            cont = jnp.float32(1.0 - minibatch.term[:-2])
+            returns_rollout = jax.lax.stop_gradient(
+                self._compute_lambda_returns(minibatch.reward[:-2], cont, target_next_values_rollout[:-1], target_next_values_rollout[-1], gamma, lam)
+            )
+            returns_imag = jax.lax.stop_gradient(
+                self._compute_lambda_returns(
+                    imag_rollout.reward[:-1], imag_rollout.cont[:-1], target_values_imag[1:], target_values_imag_last, self.config.gamma, self.config.lam
+                )
+            )
+
+            value_pred_rollout_symlog = self.models.critic.apply(params.critic, deter[:-2], stoch[:-2])
+            loss_critic_rollout = self.models.critic.apply(params.critic, value_pred_rollout_symlog, returns_rollout, method=self.models.critic.loss)
+            value_pred_imag_symlog = self.models.critic.apply(params.critic, imag_rollout.deter[:-1], imag_rollout.stoch[:-1])
+            loss_critic_imag = self.models.critic.apply(params.critic, value_pred_imag_symlog, returns_imag, method=self.models.critic.loss)
+
+            ret_norm_params = self.ret_norm.apply(ret_norm_params, returns_imag, method=self.ret_norm.update, mutable=["state"])[1]
+            policy = self.models.actor.apply(params.actor, imag_rollout.deter[:-1], imag_rollout.stoch[:-1], method=self.models.actor.predict)
+            log_prob = policy.log_prob(imag_rollout.action[:-1])
+            adv = jax.lax.stop_gradient(self.ret_norm.apply(ret_norm_params, returns_imag - target_values_imag[:-1]))
+            loss_actor = -jnp.mean(adv * log_prob)
+            loss_entropy = -jnp.mean(policy.entropy())
+
+            losses = Losses(
+                obs=loss_obs,
+                reward=loss_reward,
+                cont=loss_cont,
+                dyn=loss_dyn,
+                rep=loss_rep,
+                actor=loss_actor,
+                critic_imag=loss_critic_imag,
+                critic_rollout=loss_critic_rollout,
+                entropy=loss_entropy,
+            )
+
+            return jax.tree.reduce(operator.add, jax.tree.map(operator.mul, losses, self.loss_weights)), ret_norm_params
+
+        (loss, ret_norm_params), grads = jax.value_and_grad(_loss_fn, has_aux=True)(ts.params, minibatch, ts.slow_critic_params, ts.ret_norm_params)
+        ts = ts.apply_gradients(grads=grads)
+        ts = ts.replace(ret_norm_params=ret_norm_params)
+
+        return ts
 
     def collect_rollouts(
         self,
@@ -340,34 +360,34 @@ class DreamerV3:
 
         return jax.lax.scan(_collect_rollout_step, (key, ts, carry), length=length)
 
-    def observe(self, key: jax.Array, ts: DreamerState, batch: Transition, init_deter: jax.Array):
+    def observe(self, key: jax.Array, params: Params, batch: Transition, init_deter: jax.Array):
         def _observe_step(state: Tuple[jax.Array, jax.Array], transition: Transition):
             key, deter_cur = state
-            embed = self.models.encoder.apply(ts.params.encoder, transition.obs)
-            stoch_posterior_dist = self.models.posterior.apply(ts.params.posterior, deter_cur, embed, method=self.models.posterior.predict)
+            embed = self.models.encoder.apply(params.encoder, transition.obs)
+            stoch_posterior_dist = self.models.posterior.apply(params.posterior, deter_cur, embed, method=self.models.posterior.predict)
             key, sample_key = jax.random.split(key)
             stoch_posterior_probs = stoch_posterior_dist.probs
             stoch_posterior = stoch_posterior_dist.sample(seed=sample_key) + stoch_posterior_probs - jax.lax.stop_gradient(stoch_posterior_probs)
-            deter_new = self.models.dynamics.apply(ts.params.dynamics, deter_cur, stoch_posterior, transition.action)
+            deter_new = self.models.dynamics.apply(params.dynamics, deter_cur, stoch_posterior, transition.action)
             deter_new = jnp.where(transition.term[:, None], init_deter, deter_new)
             return (key, deter_new), (deter_cur, stoch_posterior, stoch_posterior_probs)
 
         _, (deter, stoch, stoch_probs) = jax.lax.scan(_observe_step, (key, init_deter), batch)
         return deter, stoch, stoch_probs
 
-    def imagine(self, key: jax.Array, ts: DreamerState, init: Tuple[jax.Array, jax.Array], length: int):
+    def imagine(self, key: jax.Array, params: Params, init: Tuple[jax.Array, jax.Array], length: int):
         deter, stoch = init
 
         def _imagine_step(state: Tuple[jax.Array, jax.Array, jax.Array], _):
             key, deter_cur, stoch_cur = state
-            policy = self.models.actor.apply(ts.params.actor, deter_cur, stoch_cur, method=self.models.actor.predict)
+            policy = self.models.actor.apply(params.actor, deter_cur, stoch_cur, method=self.models.actor.predict)
             key, policy_key, stoch_key = jax.random.split(key, 3)
             action = policy.sample(seed=policy_key)
             log_prob = policy.log_prob(action)
-            deter_new = self.models.dynamics.apply(ts.params.dynamics, deter_cur, stoch_cur, action)
-            stoch_new = self.models.prior.apply(ts.params.prior, deter_new, method=self.models.prior.predict).sample(seed=stoch_key)
-            reward = self.models.reward_predictor.apply(ts.params.reward_predictor, deter_new, stoch_new, method=self.models.reward_predictor.predict)
-            cont = self.models.cont_predictor.apply(ts.params.cont_predictor, deter_new, stoch_new, method=self.models.cont_predictor.predict)
+            deter_new = self.models.dynamics.apply(params.dynamics, deter_cur, stoch_cur, action)
+            stoch_new = self.models.prior.apply(params.prior, deter_new, method=self.models.prior.predict).sample(seed=stoch_key)
+            reward = self.models.reward_predictor.apply(params.reward_predictor, deter_new, stoch_new, method=self.models.reward_predictor.predict)
+            cont = self.models.cont_predictor.apply(params.cont_predictor, deter_new, stoch_new, method=self.models.cont_predictor.predict)
             transition = ImagTransition(deter=deter_cur, stoch=stoch_cur, action=action, log_prob=log_prob, reward=reward, cont=cont)
             return (key, deter_new, stoch_new), transition
 
@@ -382,6 +402,11 @@ class DreamerV3:
 
         _, returns = jax.lax.scan(_lambda_return_step, last_value, (rewards, conts, next_values), reverse=True)
         return returns
+
+    def _update_slow_critic(self, slow_critic_params: Any, critic_params: Any):
+        critic_tau = self.config.critic_tau
+        slow_critic_params = jax.tree.map(lambda x, y: critic_tau * x + (1 - critic_tau) * y, slow_critic_params, critic_params)
+        return slow_critic_params
 
     def _log_models(self, env: Environment, env_state: EnvState):
         obs_shape = env.observation_space(env_state).shape
