@@ -341,10 +341,10 @@ class DreamerV3:
             obs = carry.last_obs
             embed = self.models.encoder.apply(ts.params.encoder, obs)
             stoch_posterior_dist = self.models.posterior.apply(ts.params.posterior, deter, embed, method=self.models.posterior.predict)
-            key, sample_key, step_key = jax.random.split(key, 3)
-            stoch_posterior = stoch_posterior_dist.sample(seed=sample_key)
+            key, stoch_key, act_key, step_key = jax.random.split(key, 4)
+            stoch_posterior = stoch_posterior_dist.sample(seed=stoch_key)
             policy = self.models.actor.apply(ts.params.actor, deter, stoch_posterior, method=self.models.actor.predict)
-            action = policy.sample(seed=sample_key)
+            action = policy.sample(seed=act_key)
             obs_new, env_state, reward, done, info = jax.vmap(env.step)(jax.random.split(step_key, self.config.num_worlds), carry.env_state, action)
             deter_new = self.models.dynamics.apply(ts.params.dynamics, deter, stoch_posterior, action)
             deter_new = jnp.where(done[:, None], self.models.dynamics.get_initial_deter(self.config.num_worlds), deter_new)
