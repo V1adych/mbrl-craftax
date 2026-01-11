@@ -10,6 +10,7 @@ class Transition:
     obs: jax.Array
     action: jax.Array
     reward_prev: jax.Array
+    reward: jax.Array
     term: jax.Array
     reset: jax.Array
 
@@ -38,11 +39,12 @@ class ReplayBuffer:
         obs = _init_from_sample(data.obs, 0, sz, b)
         action = _init_from_sample(data.action, 0, sz, b)
         reward_prev = _init_from_sample(data.reward_prev, 0, sz, b)
+        reward = _init_from_sample(data.reward, 0, sz, b)
         term = _init_from_sample(data.term, True, sz, b)
         reset = _init_from_sample(data.reset, True, sz, b)
 
         return ReplayBufferState(
-            data=Transition(obs=obs, action=action, reward_prev=reward_prev, term=term, reset=reset),
+            data=Transition(obs=obs, action=action, reward_prev=reward_prev, reward=reward, term=term, reset=reset),
             ptr=jnp.asarray(t, dtype=jnp.int32),
             filled=jnp.asarray(False, dtype=jnp.bool),
         )
@@ -62,6 +64,7 @@ class ReplayBuffer:
             obs=_write(data.obs, rollout.obs),
             action=_write(data.action, rollout.action),
             reward_prev=_write(data.reward_prev, rollout.reward_prev),
+            reward=_write(data.reward, rollout.reward),
             term=_write(data.term, rollout.term),
             reset=_write(data.reset, rollout.reset),
         )
@@ -99,6 +102,7 @@ class ReplayBuffer:
             obs=_gather(data.obs),
             action=_gather(data.action),
             reward_prev=_gather(data.reward_prev),
+            reward=_gather(data.reward),
             term=_gather(data.term),
             reset=_gather(data.reset),
         )
