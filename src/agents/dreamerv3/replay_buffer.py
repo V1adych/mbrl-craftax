@@ -1,3 +1,4 @@
+from typing import Any
 import jax
 from jax import numpy as jnp
 from flax import struct
@@ -9,6 +10,7 @@ class Transition:
     obs: jax.Array
     action: jax.Array
     reward_prev: jax.Array
+    term: jax.Array
     reset: jax.Array
 
 
@@ -28,18 +30,19 @@ class ReplayBuffer:
         sz = self.config.max_length
         assert t <= sz, f"Expected rollout length to be less than or equal to max size, got t={t} and max_length={sz}"
 
-        def _init_from_sample(arr: jax.Array, t: int, b: int):
-            data = jnp.zeros((t, b, *arr.shape[2:]), dtype=arr.dtype)
+        def _init_from_sample(arr: jax.Array, value: Any, t: int, b: int):
+            data = jnp.full((t, b, *arr.shape[2:]), value, dtype=arr.dtype)
             data = data.at[: arr.shape[0]].set(arr)
             return data
 
-        obs = _init_from_sample(data.obs, sz, b)
-        action = _init_from_sample(data.action, sz, b)
-        reward_prev = _init_from_sample(data.reward_prev, sz, b)
-        reset = _init_from_sample(data.reset, sz, b)
+        obs = _init_from_sample(data.obs, 0, sz, b)
+        action = _init_from_sample(data.action, 0, sz, b)
+        reward_prev = _init_from_sample(data.reward_prev, 0, sz, b)
+        term = _init_from_sample(data.term, True, sz, b)
+        reset = _init_from_sample(data.reset, True, sz, b)
 
         return ReplayBufferState(
-            data=Transition(obs=obs, action=action, reward_prev=reward_prev, reset=reset),
+            data=Transition(obs=obs, action=action, reward_prev=reward_prev, term=term, reset=reset),
             ptr=jnp.asarray(t, dtype=jnp.int32),
             filled=jnp.asarray(False, dtype=jnp.bool),
         )
@@ -59,11 +62,12 @@ class ReplayBuffer:
             obs=_write(data.obs, rollout.obs),
             action=_write(data.action, rollout.action),
             reward_prev=_write(data.reward_prev, rollout.reward_prev),
+            term=_write(data.term, rollout.term),
             reset=_write(data.reset, rollout.reset),
         )
 
-        wrote_past_end = (ptr + jnp.asarray(t, dtype=jnp.int32)) >= jnp.asarray(sz, dtype=jnp.int32)
-        new_ptr = (ptr + jnp.asarray(t, dtype=jnp.int32)) % jnp.asarray(sz, dtype=jnp.int32)
+        wrote_past_end = (ptr + t) >= sz
+        new_ptr = (ptr + t) % sz
         new_filled = jnp.logical_or(state.filled, wrote_past_end)
         return ReplayBufferState(data=new_data, ptr=new_ptr, filled=new_filled)
 
@@ -74,34 +78,27 @@ class ReplayBuffer:
         length: int,
         batch_size: int,
     ) -> Transition:
-        sz = self.config.max_length
         data = state.data
         ptr = state.ptr
 
-        b_env = data.obs.shape[1]
-        b_env = jnp.asarray(b_env, dtype=jnp.int32)
-        sz_i32 = jnp.asarray(sz, dtype=jnp.int32)
+        cur_size = jnp.where(state.filled, self.config.max_length, ptr)
+        prefix_offset = jnp.where(state.filled, ptr, 0)
+        max_start = cur_size - (length - 1)
 
-        max_start = jnp.where(state.filled, sz_i32, ptr - jnp.asarray(length - 1, dtype=jnp.int32))
         key_t, key_env = jax.random.split(key, 2)
-        start = jax.random.randint(key_t, (batch_size,), 0, max_start, dtype=jnp.int32)
-        env_id = jax.random.randint(key_env, (batch_size,), 0, b_env, dtype=jnp.int32)
-
-        offs = jnp.arange(length, dtype=jnp.int32)[:, None]
-        time_idx = (start[None, :] + offs) % sz_i32
+        start = jax.random.randint(key_t, (batch_size,), prefix_offset, max_start + prefix_offset, dtype=jnp.int32)
+        env_id = jax.random.randint(key_env, (batch_size,), 0, data.obs.shape[1], dtype=jnp.int32)
+        offsets = jnp.arange(length, dtype=jnp.int32)[:, None]
+        time_idx = (start[None, :] + offsets) % self.config.max_length
         env_idx = jnp.broadcast_to(env_id[None, :], time_idx.shape)
 
         def _gather(buf: jax.Array) -> jax.Array:
             return buf[time_idx, env_idx]
 
-        out = Transition(
+        return Transition(
             obs=_gather(data.obs),
             action=_gather(data.action),
             reward_prev=_gather(data.reward_prev),
+            term=_gather(data.term),
             reset=_gather(data.reset),
         )
-
-        boundary_reset = time_idx == ptr
-        out = out.replace(reset=jnp.logical_or(out.reset, boundary_reset))
-
-        return out

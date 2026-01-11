@@ -202,6 +202,7 @@ class DreamerV3:
             obs=jnp.zeros((0, self.config.num_worlds, *obs_shape), dtype=obs.dtype),
             action=jnp.zeros((0, self.config.num_worlds), dtype=jnp.int32),
             reward_prev=jnp.zeros((0, self.config.num_worlds), dtype=jnp.float32),
+            term=jnp.ones((0, self.config.num_worlds), dtype=jnp.bool),
             reset=jnp.zeros((0, self.config.num_worlds), dtype=jnp.bool),
         )
         self.replay = ReplayBuffer(self.config.replay_buffer)
@@ -270,7 +271,7 @@ class DreamerV3:
             deter_new = self.models.dynamics.apply(ts.params.dynamics, deter, stoch_posterior, action)
             deter_new = jnp.where(done[:, None], self.models.dynamics.get_initial_deter(self.config.num_worlds), deter_new)
 
-            transition = Transition(obs=obs, action=action, reward_prev=carry.last_reward, reset=carry.last_term)
+            transition = Transition(obs=obs, action=action, reward_prev=carry.last_reward, term=done, reset=carry.last_term)
             ts = ts.replace(global_step=ts.global_step + self.config.num_worlds)
             carry_new = DreamerCarry(env_state=env_state, last_obs=obs_new, last_deter=deter_new, last_reward=reward, last_term=done)
 
@@ -357,7 +358,7 @@ class DreamerV3:
             target_values_imag = self.models.critic.apply(slow_critic_params, imag_rollout.deter, imag_rollout.stoch, method=self.models.critic.predict)
             target_values_imag_last = self.models.critic.apply(slow_critic_params, deter_last, stoch_last, method=self.models.critic.predict)
 
-            cont = jnp.float32(1.0 - minibatch.reset[1:])
+            cont = ac_rollout_weight = jnp.float32(~minibatch.reset[1:])
             returns_rollout = jax.lax.stop_gradient(
                 compute_lambda_returns(minibatch.reward_prev[1:], cont, target_next_values_rollout[:-1], target_next_values_rollout[-1], gamma, lam)
             )
@@ -366,7 +367,6 @@ class DreamerV3:
                     imag_rollout.reward, imag_rollout.cont, target_values_imag, target_values_imag_last, self.config.gamma, self.config.lam
                 )
             )
-            ac_rollout_weight = jnp.cumprod(cont * gamma, axis=0) / gamma
             ac_imag_weight = jnp.cumprod(imag_rollout.cont * gamma, axis=0) / gamma
 
             value_pred_rollout_symlog = self.models.critic.apply(params.critic, deter[:-1], stoch[:-1])
