@@ -228,7 +228,7 @@ class DreamerV3:
             key, rollout_key = jax.random.split(key)
             ts, carry, rollout, debug_infos = self.collect_rollouts(rollout_key, ts, carry, env, self.config.rollout_length)
 
-            jax.debug.callback(info_callback, debug_infos)
+            # jax.debug.callback(info_callback, debug_infos)
 
             replay_state = self.replay.add(replay_state, rollout)
 
@@ -243,7 +243,6 @@ class DreamerV3:
                 return (key, ts), None
 
             (key, ts), metrics = jax.lax.scan(_update, (key, ts), batch)
-            ts = ts.replace(slow_critic_params=self._update_slow_critic(ts.slow_critic_params, ts.params.critic))
 
             return (key, ts, carry, replay_state), None
 
@@ -410,12 +409,13 @@ class DreamerV3:
 
         (loss, ret_norm_params), grads = jax.value_and_grad(_loss_fn, has_aux=True)(ts.params, minibatch, ts.slow_critic_params, ts.ret_norm_params)
         ts = ts.apply_gradients(grads=grads)
+        ts = jax.lax.cond((ts.step % self.config.slow_critic_update_period) == 0, lambda: ts.replace(slow_critic_params=self._update_slow_critic(ts.slow_critic_params, ts.params.critic)), lambda: ts)
         ts = ts.replace(ret_norm_params=ret_norm_params)
 
         return ts
 
     def _update_slow_critic(self, slow_critic_params: Any, critic_params: Any):
-        critic_tau = self.config.critic_tau
+        critic_tau = self.config.slow_critic_tau
         slow_critic_params = jax.tree.map(lambda x, y: critic_tau * x + (1 - critic_tau) * y, slow_critic_params, critic_params)
         return slow_critic_params
 
