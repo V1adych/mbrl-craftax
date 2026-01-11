@@ -75,6 +75,13 @@ class Losses:
     entropy: jax.Array
 
 
+@struct.dataclass
+class DebugInfo:
+    global_step: jax.Array
+    done: jax.Array
+    info: Dict[str, Any]
+
+
 class DreamerState(train_state.TrainState):
     global_step: int
     slow_critic_params: Any
@@ -214,7 +221,14 @@ class DreamerV3:
 
         def _update_loop(state: Tuple[jax.Array, DreamerState, DreamerCarry, ReplayBufferState], _):
             key, ts, carry, replay_state = state
-            (key, ts, carry), rollout = self.collect_rollouts(key, ts, carry, env, self.config.rollout_length)
+
+            def info_callback(info: DebugInfo):
+                return # TODO
+
+            key, rollout_key = jax.random.split(key)
+            ts, carry, rollout, debug_infos = self.collect_rollouts(rollout_key, ts, carry, env, self.config.rollout_length)
+
+            jax.debug.callback(info_callback, debug_infos)
 
             replay_state = self.replay.add(replay_state, rollout)
 
@@ -237,7 +251,8 @@ class DreamerV3:
             to_prefill = sample_length - self.config.rollout_length
 
             def _prefill(key: jax.Array, ts: DreamerState, carry: DreamerCarry, replay_state: ReplayBufferState, to_prefill: int):
-                (key, ts, carry), prefill_rollout = self.collect_rollouts(key, ts, carry, env, to_prefill)
+                key, prefill_key = jax.random.split(key)
+                ts, carry, prefill_rollout, _ = self.collect_rollouts(prefill_key, ts, carry, env, to_prefill)
                 replay_state = self.replay.add(replay_state, prefill_rollout)
                 return key, ts, carry, replay_state
 
@@ -247,7 +262,7 @@ class DreamerV3:
             _, ts, _, _ = state
             return ts
 
-        ts = _fit(key, ts, carry, replay_state)
+        ts = jax.jit(_fit)(key, ts, carry, replay_state)
 
     def collect_rollouts(
         self,
@@ -256,7 +271,6 @@ class DreamerV3:
         carry: DreamerCarry,
         env: Environment,
         length: int,
-        info_callback: Optional[Callable[[Dict[str, Any], jax.Array, int], None]] = None,
     ):
         def _collect_rollout_step(state: Tuple[jax.Array, DreamerState, DreamerCarry], _):
             key, ts, carry = state
@@ -274,14 +288,12 @@ class DreamerV3:
 
             transition = Transition(obs=obs, action=action, reward_prev=carry.last_reward, reward=reward, term=done, reset=carry.last_term)
             ts = ts.replace(global_step=ts.global_step + self.config.num_worlds)
+            debug_info = DebugInfo(global_step=ts.global_step, done=done, info=info)
             carry_new = DreamerCarry(env_state=env_state, last_obs=obs_new, last_deter=deter_new, last_reward=reward, last_term=done)
+            return (key, ts, carry_new), (transition, debug_info)
 
-            if info_callback is not None:
-                jax.debug.callback(info_callback, info, done, ts.global_step)
-
-            return (key, ts, carry_new), transition
-
-        return jax.lax.scan(_collect_rollout_step, (key, ts, carry), length=length)
+        (_, ts, carry), (transitions, debug_infos) = jax.lax.scan(_collect_rollout_step, (key, ts, carry), length=length)
+        return ts, carry, transitions, debug_infos
 
     def observe(self, key: jax.Array, params: Params, batch: Transition, init_deter: jax.Array):
         reset_deter = self.models.dynamics.get_initial_deter(batch.obs.shape[1])
