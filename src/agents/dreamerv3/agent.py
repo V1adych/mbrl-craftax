@@ -1,7 +1,6 @@
 from __future__ import annotations
 from typing import Any, Tuple, Dict, Optional, Callable
 import operator
-import numpy as np
 import jax
 from jax import numpy as jnp
 from flax import struct
@@ -236,9 +235,12 @@ class DreamerV3:
             ts, carry, rollout, debug_infos = self.collect_rollouts(rollout_key, ts, carry, env, self.config.rollout_length)
 
             def info_callback(info: DebugInfo):
-                shapes = jax.tree.map(np.shape, info)
-                print(f"received info: {shapes}")
-                return  # TODO
+                if self.run is None:
+                    return
+                timesteps_done, world_done = jnp.where(info.done)
+                for i, j in zip(timesteps_done, world_done):
+                    for k, v in info.info.items():
+                        self.run.track(v[i, j].item(), name=k, step=info.global_step[i].item())
 
             if self.run is not None:
                 jax.debug.callback(info_callback, debug_infos)
