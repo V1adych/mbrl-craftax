@@ -1,16 +1,19 @@
 from __future__ import annotations
+from pathlib import Path
+from datetime import datetime
 from typing import Any, Tuple, Dict, Optional, Callable
 import operator
+import numpy as np
 import jax
 from jax import numpy as jnp
 from flax import struct
 from flax.training import train_state
 import optax
 from einops import rearrange
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 from gymnax.environments.environment import Environment
 from craftax.craftax_classic.envs.craftax_state import EnvState
-
+from aim import Run
 from .models import Dynamics, Encoder, ObsDecoder, RewardPredictor, ContPredictor, Posterior, Prior, Actor, Critic
 from .norm import RetNorm
 from .replay_buffer import Transition, ReplayBuffer, ReplayBufferState
@@ -103,6 +106,7 @@ class DreamerV3:
         self.config = config
         self.models: Models = None
         self.replay: ReplayBuffer = None
+        self.run: Run = None
         self.ret_norm = RetNorm(self.config.ret_norm)
 
         self.loss_weights: Losses = Losses(
@@ -116,6 +120,11 @@ class DreamerV3:
             critic_imag=jnp.float32(self.config.loss.critic_imag),
             entropy=jnp.float32(self.config.loss.entropy),
         )
+
+    def _init_logger(self):
+        if not self.config.log_aim:
+            return
+        self.run = Run(repo=self.config.logger.log_dir, experiment=self.config.logger.experiment_name)
 
     def _init_models(self, key: jax.Array, env: Environment, env_state: EnvState):
         actspace = env.action_space(env_state).n
@@ -184,6 +193,9 @@ class DreamerV3:
         key, init_key = jax.random.split(key)
         variables, slow_critic_params, ret_norm_params = self._init_models(init_key, env, env_state)
         self._log_models(env, env_state)
+        self._init_logger()
+        self._log_hparams()
+        self._log_scalars(variables)
 
         def _is_params(path, _):
             for p in path:
@@ -222,13 +234,17 @@ class DreamerV3:
         def _update_loop(state: Tuple[jax.Array, DreamerState, DreamerCarry, ReplayBufferState], _):
             key, ts, carry, replay_state = state
 
-            def info_callback(info: DebugInfo):
-                return # TODO
-
             key, rollout_key = jax.random.split(key)
+            jax.debug.print("collecting rollouts")
             ts, carry, rollout, debug_infos = self.collect_rollouts(rollout_key, ts, carry, env, self.config.rollout_length)
 
-            # jax.debug.callback(info_callback, debug_infos)
+            def info_callback(info: DebugInfo):
+                shapes = jax.tree.map(np.shape, info)
+                print(f"received info: {shapes}")
+                return  # TODO
+
+            if self.run is not None:
+                jax.debug.callback(info_callback, debug_infos)
 
             replay_state = self.replay.add(replay_state, rollout)
 
@@ -241,6 +257,7 @@ class DreamerV3:
                 key, update_key = jax.random.split(key)
                 ts = self.update(update_key, ts, minibatch)
                 return (key, ts), None
+            jax.debug.print("updating")
 
             (key, ts), metrics = jax.lax.scan(_update, (key, ts), batch)
 
@@ -353,7 +370,7 @@ class DreamerV3:
             )
 
             cont_logits = self.models.cont_predictor.apply(params.cont_predictor, deter, stoch)
-            cont_target = 1.0 - minibatch.reset.astype(jnp.float32)
+            cont_target = jnp.float32(~minibatch.reset)
             loss_cont = self.models.cont_predictor.apply(params.cont_predictor, cont_logits, cont_target, method=self.models.cont_predictor.loss)
 
             stoch_prior_probs = self.models.prior.apply(params.prior, deter, method=self.models.prior.predict).probs
@@ -408,11 +425,40 @@ class DreamerV3:
             return jax.tree.reduce(operator.add, jax.tree.map(operator.mul, losses, self.loss_weights)), ret_norm_params
 
         (loss, ret_norm_params), grads = jax.value_and_grad(_loss_fn, has_aux=True)(ts.params, minibatch, ts.slow_critic_params, ts.ret_norm_params)
+        # loss = _loss_fn(ts.params, minibatch, ts.slow_critic_params, ts.ret_norm_params)
         ts = ts.apply_gradients(grads=grads)
-        ts = jax.lax.cond((ts.step % self.config.slow_critic_update_period) == 0, lambda: ts.replace(slow_critic_params=self._update_slow_critic(ts.slow_critic_params, ts.params.critic)), lambda: ts)
-        ts = ts.replace(ret_norm_params=ret_norm_params)
+        ts = jax.lax.cond(
+            (ts.step % self.config.slow_critic_update_period) == 0,
+            lambda: ts.replace(slow_critic_params=self._update_slow_critic(ts.slow_critic_params, ts.params.critic)),
+            lambda: ts,
+        )
+        # ts = ts.replace(ret_norm_params=ret_norm_params)
+        jax.debug.print("performed one grad step")
 
         return ts
+
+    def _log_hparams(self):
+        if self.run is None:
+            return
+        hparams = OmegaConf.to_container(self.config)
+        self.run["hparams"] = hparams
+
+    def _log_scalars(self, params: Params):
+        if self.run is None:
+            return
+        scalars = {}
+        for name, value in params.__dict__.items():
+            scalars[f"params_{name}"] = sum(x.size for x in jax.tree.leaves(value))
+
+        grad_steps_ratio = (
+            self.config.num_grad_steps * self.config.batch_size * self.config.batch_length / (self.config.num_worlds * self.config.rollout_length)
+        )
+        scalars["grad_steps_ratio"] = grad_steps_ratio
+        ac_update_ratio = self.config.imag_last_states * self.config.imag_horizon / self.config.batch_length
+        scalars["ac_update_ratio"] = ac_update_ratio
+
+        for name, value in scalars.items():
+            self.run.track(value, name=name, step=0)
 
     def _update_slow_critic(self, slow_critic_params: Any, critic_params: Any):
         critic_tau = self.config.slow_critic_tau
