@@ -1,6 +1,4 @@
 from __future__ import annotations
-from pathlib import Path
-from datetime import datetime
 from typing import Any, Tuple, Dict, Optional, Callable
 import operator
 import numpy as np
@@ -235,7 +233,6 @@ class DreamerV3:
             key, ts, carry, replay_state = state
 
             key, rollout_key = jax.random.split(key)
-            jax.debug.print("collecting rollouts")
             ts, carry, rollout, debug_infos = self.collect_rollouts(rollout_key, ts, carry, env, self.config.rollout_length)
 
             def info_callback(info: DebugInfo):
@@ -257,7 +254,6 @@ class DreamerV3:
                 key, update_key = jax.random.split(key)
                 ts = self.update(update_key, ts, minibatch)
                 return (key, ts), None
-            jax.debug.print("updating")
 
             (key, ts), metrics = jax.lax.scan(_update, (key, ts), batch)
 
@@ -424,16 +420,17 @@ class DreamerV3:
 
             return jax.tree.reduce(operator.add, jax.tree.map(operator.mul, losses, self.loss_weights)), ret_norm_params
 
-        (loss, ret_norm_params), grads = jax.value_and_grad(_loss_fn, has_aux=True)(ts.params, minibatch, ts.slow_critic_params, ts.ret_norm_params)
-        # loss = _loss_fn(ts.params, minibatch, ts.slow_critic_params, ts.ret_norm_params)
-        ts = ts.apply_gradients(grads=grads)
-        ts = jax.lax.cond(
-            (ts.step % self.config.slow_critic_update_period) == 0,
-            lambda: ts.replace(slow_critic_params=self._update_slow_critic(ts.slow_critic_params, ts.params.critic)),
-            lambda: ts,
-        )
-        # ts = ts.replace(ret_norm_params=ret_norm_params)
-        jax.debug.print("performed one grad step")
+        if self.config.do_update:
+            (loss, ret_norm_params), grads = jax.value_and_grad(_loss_fn, has_aux=True)(ts.params, minibatch, ts.slow_critic_params, ts.ret_norm_params)
+            ts = ts.apply_gradients(grads=grads)
+            ts = jax.lax.cond(
+                (ts.step % self.config.slow_critic_update_period) == 0,
+                lambda: ts.replace(slow_critic_params=self._update_slow_critic(ts.slow_critic_params, ts.params.critic)),
+                lambda: ts,
+            )
+            ts = ts.replace(ret_norm_params=ret_norm_params)
+        else:
+            loss, _ = _loss_fn(ts.params, minibatch, ts.slow_critic_params, ts.ret_norm_params)
 
         return ts
 
