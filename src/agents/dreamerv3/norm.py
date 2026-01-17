@@ -26,3 +26,6 @@ class RetNorm(linen.Module):
 
     def __call__(self, x: jax.Array):
         return x / self.scale()
+
+    def get_state(self):
+        return {"q_low": self.q_low.value, "q_high": self.q_high.value}

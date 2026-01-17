@@ -192,7 +192,7 @@ class DreamerV3:
         self._log_models(env, env_state)
         self._init_logger()
         self._log_hparams()
-        self._log_scalars(variables)
+        self._log_static(variables)
 
         def _is_params(path, _):
             for p in path:
@@ -235,12 +235,10 @@ class DreamerV3:
             ts, carry, rollout, debug_infos = self.collect_rollouts(rollout_key, ts, carry, env, self.config.rollout_length)
 
             def info_callback(info: DebugInfo):
-                if self.run is None:
-                    return
                 timesteps_done, world_done = jnp.where(info.done)
                 for i, j in zip(timesteps_done, world_done):
                     for k, v in info.info.items():
-                        self.run.track(v[i, j].item(), name=k, step=info.global_step[i].item())
+                        self.run.track(v[i, j].item(), name=f"rollout/{k}", step=info.global_step[i].item(), context={"stage": "rollout"})
 
             if self.run is not None:
                 jax.debug.callback(info_callback, debug_infos)
@@ -254,10 +252,18 @@ class DreamerV3:
             def _update(carry: Tuple[jax.Array, DreamerState], minibatch: Transition):
                 key, ts = carry
                 key, update_key = jax.random.split(key)
-                ts = self.update(update_key, ts, minibatch)
-                return (key, ts), None
+                ts, metrics = self.update(update_key, ts, minibatch)
+                return (key, ts), metrics
 
             (key, ts), metrics = jax.lax.scan(_update, (key, ts), batch)
+            metrics = jax.tree.map(jnp.mean, metrics)
+
+            def metrics_callback(metrics: Dict[str, jax.Array], global_step: jax.Array):
+                for k, v in metrics.items():
+                    self.run.track(v.item(), name=f"update/{k}", step=global_step.item(), context={"stage": "update"})
+
+            if self.run is not None:
+                jax.debug.callback(metrics_callback, metrics, ts.global_step)
 
             return (key, ts, carry, replay_state), None
 
@@ -419,11 +425,21 @@ class DreamerV3:
                 critic_rollout=loss_critic_rollout,
                 entropy=loss_entropy,
             )
+            metrics = {f"loss/{k}": v for k, v in losses.__dict__.items()}
+            metrics["kl_clipfrac"] = kl_clipfrac
+            metrics["rollout/reward"] = jnp.mean(minibatch.reward)
+            metrics["imagination/reward"] = jnp.mean(imag_rollout.reward)
+            metrics["rollout/return"] = jnp.mean(returns_rollout)
+            metrics["imagination/return"] = jnp.mean(returns_imag)
+            metrics["imagination/advantage"] = jnp.mean(adv)
+            metrics.update({f"ret_norm/{k}": v for k, v in self.ret_norm.apply(ret_norm_params, method=self.ret_norm.get_state).items()})
 
-            return jax.tree.reduce(operator.add, jax.tree.map(operator.mul, losses, self.loss_weights)), ret_norm_params
+            return jax.tree.reduce(operator.add, jax.tree.map(operator.mul, losses, self.loss_weights)), ret_norm_params, metrics, imag_rollout, log_prob
 
         if self.config.do_update:
-            (loss, ret_norm_params), grads = jax.value_and_grad(_loss_fn, has_aux=True)(ts.params, minibatch, ts.slow_critic_params, ts.ret_norm_params)
+            (loss, ret_norm_params, metrics, imag_rollout, log_prob), grads = jax.value_and_grad(_loss_fn, has_aux=True)(
+                ts.params, minibatch, ts.slow_critic_params, ts.ret_norm_params
+            )
             ts = ts.apply_gradients(grads=grads)
             ts = jax.lax.cond(
                 (ts.step % self.config.slow_critic_update_period) == 0,
@@ -432,9 +448,16 @@ class DreamerV3:
             )
             ts = ts.replace(ret_norm_params=ret_norm_params)
         else:
-            loss, _ = _loss_fn(ts.params, minibatch, ts.slow_critic_params, ts.ret_norm_params)
+            loss, _, metrics, imag_rollout, log_prob = _loss_fn(ts.params, minibatch, ts.slow_critic_params, ts.ret_norm_params)
 
-        return ts
+        policy_new = self.models.actor.apply(ts.params.actor, imag_rollout.deter, imag_rollout.stoch, method=self.models.actor.predict)
+        log_prob_new = policy_new.log_prob(imag_rollout.action)
+        ratio = jnp.exp(log_prob_new - log_prob)
+        approx_kl = jnp.mean(ratio - 1.0 - jnp.log(ratio))
+        metrics["approx_kl"] = approx_kl
+        metrics["loss/total"] = loss
+
+        return ts, metrics
 
     def _log_hparams(self):
         if self.run is None:
@@ -442,22 +465,20 @@ class DreamerV3:
         hparams = OmegaConf.to_container(self.config)
         self.run["hparams"] = hparams
 
-    def _log_scalars(self, params: Params):
+    def _log_static(self, params: Params):
         if self.run is None:
             return
-        scalars = {}
+        static = {}
         for name, value in params.__dict__.items():
-            scalars[f"params_{name}"] = sum(x.size for x in jax.tree.leaves(value))
+            static[f"params_{name}"] = sum(x.size for x in jax.tree.leaves(value))
 
-        grad_steps_ratio = (
-            self.config.num_grad_steps * self.config.batch_size * self.config.batch_length / (self.config.num_worlds * self.config.rollout_length)
-        )
-        scalars["grad_steps_ratio"] = grad_steps_ratio
-        ac_update_ratio = self.config.imag_last_states * self.config.imag_horizon / self.config.batch_length
-        scalars["ac_update_ratio"] = ac_update_ratio
+        grad_steps = self.config.num_grad_steps * self.config.batch_size * self.config.batch_length
+        rollout_steps = self.config.num_worlds * self.config.rollout_length
+        static["grad_steps_ratio"] = float(grad_steps / rollout_steps)
+        static["ac_update_ratio"] = float(self.config.imag_last_states * self.config.imag_horizon / self.config.batch_length)
+        static["total_steps"] = self.config.num_updates * self.config.num_worlds * self.config.rollout_length
 
-        for name, value in scalars.items():
-            self.run.track(value, name=name, step=0)
+        self.run["static"] = static
 
     def _update_slow_critic(self, slow_critic_params: Any, critic_params: Any):
         critic_tau = self.config.slow_critic_tau
