@@ -434,10 +434,10 @@ class DreamerV3:
             metrics["imagination/advantage"] = jnp.mean(adv)
             metrics.update({f"ret_norm/{k}": v for k, v in self.ret_norm.apply(ret_norm_params, method=self.ret_norm.get_state).items()})
 
-            return jax.tree.reduce(operator.add, jax.tree.map(operator.mul, losses, self.loss_weights)), ret_norm_params, metrics, imag_rollout, log_prob
+            return jax.tree.reduce(operator.add, jax.tree.map(operator.mul, losses, self.loss_weights)), (ret_norm_params, metrics, imag_rollout, log_prob)
 
         if self.config.do_update:
-            (loss, ret_norm_params, metrics, imag_rollout, log_prob), grads = jax.value_and_grad(_loss_fn, has_aux=True)(
+            (loss, (ret_norm_params, metrics, imag_rollout, log_prob)), grads = jax.value_and_grad(_loss_fn, has_aux=True)(
                 ts.params, minibatch, ts.slow_critic_params, ts.ret_norm_params
             )
             ts = ts.apply_gradients(grads=grads)
@@ -448,7 +448,7 @@ class DreamerV3:
             )
             ts = ts.replace(ret_norm_params=ret_norm_params)
         else:
-            loss, _, metrics, imag_rollout, log_prob = _loss_fn(ts.params, minibatch, ts.slow_critic_params, ts.ret_norm_params)
+            loss, (ret_norm_params, metrics, imag_rollout, log_prob) = _loss_fn(ts.params, minibatch, ts.slow_critic_params, ts.ret_norm_params)
 
         policy_new = self.models.actor.apply(ts.params.actor, imag_rollout.deter, imag_rollout.stoch, method=self.models.actor.predict)
         log_prob_new = policy_new.log_prob(imag_rollout.action)
