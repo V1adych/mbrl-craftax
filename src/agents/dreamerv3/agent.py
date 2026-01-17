@@ -1,16 +1,19 @@
 from __future__ import annotations
 from typing import Any, Tuple, Dict, Optional, Callable
+from pathlib import Path
+from datetime import datetime
 import operator
 import jax
 from jax import numpy as jnp
 from flax import struct
 from flax.training import train_state
 import optax
+from orbax import checkpoint as ocp
 from einops import rearrange
 from omegaconf import DictConfig, OmegaConf
 from gymnax.environments.environment import Environment
 from craftax.craftax_classic.envs.craftax_state import EnvState
-from aim import Run
+from tensorboardX import SummaryWriter
 from .models import Dynamics, Encoder, ObsDecoder, RewardPredictor, ContPredictor, Posterior, Prior, Actor, Critic
 from .norm import RetNorm
 from .replay_buffer import Transition, ReplayBuffer, ReplayBufferState
@@ -103,7 +106,9 @@ class DreamerV3:
         self.config = config
         self.models: Models = None
         self.replay: ReplayBuffer = None
-        self.run: Run = None
+        self.writer: SummaryWriter = None
+        self.log_dir: Path = None
+        self.ckpt_opts = ocp.CheckpointManagerOptions(max_to_keep=self.config.logging.max_ckpts, create=True)
         self.ret_norm = RetNorm(self.config.ret_norm)
 
         self.loss_weights: Losses = Losses(
@@ -118,10 +123,16 @@ class DreamerV3:
             entropy=jnp.float32(self.config.loss.entropy),
         )
 
-    def _init_logger(self):
-        if not self.config.log_aim:
+    def _init_logging(self):
+        self.log_dir = Path(self.config.logging.log_dir) / f"{self.config.logging.experiment_name}-{datetime.now().strftime('%Y-%m-%d-%H-%M-%S')}"
+        if not self.config.log_tensorboard:
             return
-        self.run = Run(repo=self.config.logger.log_dir, experiment=self.config.logger.experiment_name)
+        self.writer = SummaryWriter(log_dir=self.log_dir)
+
+    def _save_checkpoint(self, ts: DreamerState):
+        handler = ocp.PyTreeCheckpointHandler()
+        with ocp.CheckpointManager((self.log_dir / "ckpts").absolute(), item_handlers=handler, options=self.ckpt_opts) as mgr:
+            mgr.save(ts.global_step, ts)
 
     def _init_models(self, key: jax.Array, env: Environment, env_state: EnvState):
         actspace = env.action_space(env_state).n
@@ -190,7 +201,7 @@ class DreamerV3:
         key, init_key = jax.random.split(key)
         variables, slow_critic_params, ret_norm_params = self._init_models(init_key, env, env_state)
         self._log_models(env, env_state)
-        self._init_logger()
+        self._init_logging()
         self._log_hparams()
         self._log_static(variables)
 
@@ -238,9 +249,9 @@ class DreamerV3:
                 timesteps_done, world_done = jnp.where(info.done)
                 for i, j in zip(timesteps_done, world_done):
                     for k, v in info.info.items():
-                        self.run.track(v[i, j].item(), name=f"rollout/{k}", step=info.global_step[i].item(), context={"stage": "rollout"})
+                        self.writer.add_scalar(f"rollout/{k}", v[i, j].item(), info.global_step[i].item())
 
-            if self.run is not None:
+            if self.writer is not None:
                 jax.debug.callback(info_callback, debug_infos)
 
             replay_state = self.replay.add(replay_state, rollout)
@@ -260,10 +271,13 @@ class DreamerV3:
 
             def metrics_callback(metrics: Dict[str, jax.Array], global_step: jax.Array):
                 for k, v in metrics.items():
-                    self.run.track(v.item(), name=f"update/{k}", step=global_step.item(), context={"stage": "update"})
+                    self.writer.add_scalar(f"update/{k}", v.item(), global_step.item())
 
-            if self.run is not None:
+            if self.writer is not None:
                 jax.debug.callback(metrics_callback, metrics, ts.global_step)
+
+            if self.config.save_checkpoints:
+                jax.debug.callback(self._save_checkpoint, ts)
 
             return (key, ts, carry, replay_state), None
 
@@ -460,14 +474,12 @@ class DreamerV3:
         return ts, metrics
 
     def _log_hparams(self):
-        if self.run is None:
-            return
-        hparams = OmegaConf.to_container(self.config)
-        self.run["hparams"] = hparams
+        assert self.writer is not None
+        hparams = OmegaConf.to_yaml(self.config, resolve=True)
+        self.writer.add_text("hparams", hparams, global_step=0)
 
     def _log_static(self, params: Params):
-        if self.run is None:
-            return
+        assert self.writer is not None
         static = {}
         for name, value in params.__dict__.items():
             static[f"params_{name}"] = sum(x.size for x in jax.tree.leaves(value))
@@ -478,7 +490,7 @@ class DreamerV3:
         static["ac_update_ratio"] = float(self.config.imag_last_states * self.config.imag_horizon / self.config.batch_length)
         static["total_steps"] = self.config.num_updates * self.config.num_worlds * self.config.rollout_length
 
-        self.run["static"] = static
+        self.writer.add_hparams(static, {})
 
     def _update_slow_critic(self, slow_critic_params: Any, critic_params: Any):
         critic_tau = self.config.slow_critic_tau

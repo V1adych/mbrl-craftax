@@ -1,0 +1,123 @@
+diff --git a/src/agents/dreamerv3/agent.py b/src/agents/dreamerv3/agent.py
+index a8ee697..3640653 100644
+--- a/src/agents/dreamerv3/agent.py
++++ b/src/agents/dreamerv3/agent.py
+@@ -202,6 +202,7 @@ class DreamerV3:
+             obs=jnp.zeros((0, self.config.num_worlds, *obs_shape), dtype=obs.dtype),
+             action=jnp.zeros((0, self.config.num_worlds), dtype=jnp.int32),
+             reward_prev=jnp.zeros((0, self.config.num_worlds), dtype=jnp.float32),
++            reward=jnp.zeros((0, self.config.num_worlds), dtype=jnp.float32),
+             term=jnp.ones((0, self.config.num_worlds), dtype=jnp.bool),
+             reset=jnp.zeros((0, self.config.num_worlds), dtype=jnp.bool),
+         )
+@@ -246,7 +247,7 @@ class DreamerV3:
+             _, ts, _, _ = state
+             return ts
+ 
+-        ts = jax.jit(_fit)(key, ts, carry, replay_state)
++        ts = _fit(key, ts, carry, replay_state)
+ 
+     def collect_rollouts(
+         self,
+@@ -271,7 +272,7 @@ class DreamerV3:
+             deter_new = self.models.dynamics.apply(ts.params.dynamics, deter, stoch_posterior, action)
+             deter_new = jnp.where(done[:, None], self.models.dynamics.get_initial_deter(self.config.num_worlds), deter_new)
+ 
+-            transition = Transition(obs=obs, action=action, reward_prev=carry.last_reward, term=done, reset=carry.last_term)
++            transition = Transition(obs=obs, action=action, reward_prev=carry.last_reward, reward=reward, term=done, reset=carry.last_term)
+             ts = ts.replace(global_step=ts.global_step + self.config.num_worlds)
+             carry_new = DreamerCarry(env_state=env_state, last_obs=obs_new, last_deter=deter_new, last_reward=reward, last_term=done)
+ 
+@@ -284,6 +285,7 @@ class DreamerV3:
+ 
+     def observe(self, key: jax.Array, params: Params, batch: Transition, init_deter: jax.Array):
+         reset_deter = self.models.dynamics.get_initial_deter(batch.obs.shape[1])
++
+         def _observe_step(state: Tuple[jax.Array, jax.Array], transition: Transition):
+             key, deter_cur = state
+             deter_cur_masked = jnp.where(transition.reset[:, None], reset_deter, deter_cur)
+@@ -354,30 +356,29 @@ class DreamerV3:
+ 
+             (deter_last, stoch_last), imag_rollout = jax.lax.stop_gradient(self.imagine(key, params, imag_init, self.config.imag_horizon))
+ 
+-            target_next_values_rollout = self.models.critic.apply(slow_critic_params, deter, stoch, method=self.models.critic.predict)
+-            target_values_imag = self.models.critic.apply(slow_critic_params, imag_rollout.deter, imag_rollout.stoch, method=self.models.critic.predict)
+-            target_values_imag_last = self.models.critic.apply(slow_critic_params, deter_last, stoch_last, method=self.models.critic.predict)
++            values_rollout = self.models.critic.apply(slow_critic_params, deter, stoch, method=self.models.critic.predict)
++            values_imag = self.models.critic.apply(slow_critic_params, imag_rollout.deter, imag_rollout.stoch, method=self.models.critic.predict)
++            values_rollout_last = rearrange(values_imag[1], "(t b) ... -> t b ...", t=self.config.imag_last_states, b=self.config.batch_size)[-1]
++            values_imag_last = self.models.critic.apply(slow_critic_params, deter_last, stoch_last, method=self.models.critic.predict)
+ 
+-            cont = ac_rollout_weight = jnp.float32(~minibatch.reset[1:])
+-            returns_rollout = jax.lax.stop_gradient(
+-                compute_lambda_returns(minibatch.reward_prev[1:], cont, target_next_values_rollout[:-1], target_next_values_rollout[-1], gamma, lam)
+-            )
++            cont = ac_rollout_weight = jnp.float32(~minibatch.term)
++            returns_rollout = jax.lax.stop_gradient(compute_lambda_returns(minibatch.reward, cont, values_rollout, values_rollout_last, gamma, lam))
+             returns_imag = jax.lax.stop_gradient(
+-                compute_lambda_returns(
+-                    imag_rollout.reward, imag_rollout.cont, target_values_imag, target_values_imag_last, self.config.gamma, self.config.lam
+-                )
++                compute_lambda_returns(imag_rollout.reward, imag_rollout.cont, values_imag, values_imag_last, self.config.gamma, self.config.lam)
+             )
+             ac_imag_weight = jnp.cumprod(imag_rollout.cont * gamma, axis=0) / gamma
+ 
+-            value_pred_rollout_symlog = self.models.critic.apply(params.critic, deter[:-1], stoch[:-1])
+-            loss_critic_rollout = self.models.critic.apply(params.critic, value_pred_rollout_symlog, returns_rollout, ac_rollout_weight, method=self.models.critic.loss)
++            value_pred_rollout_symlog = self.models.critic.apply(params.critic, deter, stoch)
++            loss_critic_rollout = self.models.critic.apply(
++                params.critic, value_pred_rollout_symlog, returns_rollout, ac_rollout_weight, method=self.models.critic.loss
++            )
+             value_pred_imag_symlog = self.models.critic.apply(params.critic, imag_rollout.deter, imag_rollout.stoch)
+             loss_critic_imag = self.models.critic.apply(params.critic, value_pred_imag_symlog, returns_imag, ac_imag_weight, method=self.models.critic.loss)
+ 
+             ret_norm_params = self.ret_norm.apply(ret_norm_params, returns_imag, method=self.ret_norm.update, mutable=["state"])[1]
+             policy = self.models.actor.apply(params.actor, imag_rollout.deter, imag_rollout.stoch, method=self.models.actor.predict)
+             log_prob = policy.log_prob(imag_rollout.action)
+-            adv = jax.lax.stop_gradient(self.ret_norm.apply(ret_norm_params, returns_imag - target_values_imag))
++            adv = jax.lax.stop_gradient(self.ret_norm.apply(ret_norm_params, returns_imag - values_imag))
+             loss_actor = -jnp.mean(adv * log_prob * ac_imag_weight)
+             loss_entropy = -jnp.mean(policy.entropy() * ac_imag_weight)
+ 
+diff --git a/src/agents/dreamerv3/replay_buffer.py b/src/agents/dreamerv3/replay_buffer.py
+index 1c58eef..94467ec 100644
+--- a/src/agents/dreamerv3/replay_buffer.py
++++ b/src/agents/dreamerv3/replay_buffer.py
+@@ -10,6 +10,7 @@ class Transition:
+     obs: jax.Array
+     action: jax.Array
+     reward_prev: jax.Array
++    reward: jax.Array
+     term: jax.Array
+     reset: jax.Array
+ 
+@@ -38,11 +39,12 @@ class ReplayBuffer:
+         obs = _init_from_sample(data.obs, 0, sz, b)
+         action = _init_from_sample(data.action, 0, sz, b)
+         reward_prev = _init_from_sample(data.reward_prev, 0, sz, b)
++        reward = _init_from_sample(data.reward, 0, sz, b)
+         term = _init_from_sample(data.term, True, sz, b)
+         reset = _init_from_sample(data.reset, True, sz, b)
+ 
+         return ReplayBufferState(
+-            data=Transition(obs=obs, action=action, reward_prev=reward_prev, term=term, reset=reset),
++            data=Transition(obs=obs, action=action, reward_prev=reward_prev, reward=reward, term=term, reset=reset),
+             ptr=jnp.asarray(t, dtype=jnp.int32),
+             filled=jnp.asarray(False, dtype=jnp.bool),
+         )
+@@ -62,6 +64,7 @@ class ReplayBuffer:
+             obs=_write(data.obs, rollout.obs),
+             action=_write(data.action, rollout.action),
+             reward_prev=_write(data.reward_prev, rollout.reward_prev),
++            reward=_write(data.reward, rollout.reward),
+             term=_write(data.term, rollout.term),
+             reset=_write(data.reset, rollout.reset),
+         )
+@@ -99,6 +102,7 @@ class ReplayBuffer:
+             obs=_gather(data.obs),
+             action=_gather(data.action),
+             reward_prev=_gather(data.reward_prev),
++            reward=_gather(data.reward),
+             term=_gather(data.term),
+             reset=_gather(data.reset),
+         )

@@ -22,12 +22,14 @@ dreamerv3:
   max_grad_norm: 2.5
   lr: 2e-2
   weight_decay: 1e-2
-  log_aim: false
+  log_tensorboard: false
+  save_checkpoints: false
   do_update: true
 
-  logger:
+  logging:
     log_dir: logs
     experiment_name: dreamerv3
+    max_ckpts: 3
 
   ret_norm:
     tau: 0.99
