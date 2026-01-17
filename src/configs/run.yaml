@@ -6,10 +6,10 @@ env:
   auto_reset: true
 
 dreamerv3:
-  num_updates: 10000
-  num_worlds: 64
+  num_updates: 1000
+  num_worlds: 32
   rollout_length: 128
-  batch_size: 64
+  batch_size: 32
   num_grad_steps: 32
   replay_length: 16
   batch_length: 64
@@ -20,7 +20,7 @@ dreamerv3:
   slow_critic_update_period: 8
   slow_critic_tau: 0.98
   max_grad_norm: 2.5
-  lr: 2e-2
+  lr: 1e-2
   weight_decay: 1e-2
   log_tensorboard: false
   save_checkpoints: false
@@ -52,7 +52,7 @@ dreamerv3:
     free_nats: 1.0
 
   replay_buffer:
-    max_length: 8192
+    max_length: 4096
 
   dynamics:
     deter_size: 1024
