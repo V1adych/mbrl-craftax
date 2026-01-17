@@ -36,3 +36,6 @@ def compute_lambda_returns(rewards: jax.Array, conts: jax.Array, values: jax.Arr
 
     _, returns = jax.lax.scan(_lambda_return_step, last_value, (rewards, conts, jnp.concatenate([values[1:], last_value[None]], axis=0)), reverse=True)
     return returns
+
+def r2(pred: jax.Array, target: jax.Array):
+    return 1 - jnp.sum(jnp.square(pred - target)) / (1e-9 + jnp.sum(jnp.square(target - jnp.mean(target))))

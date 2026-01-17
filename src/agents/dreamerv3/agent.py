@@ -17,7 +17,7 @@ from tensorboardX import SummaryWriter
 from .models import Dynamics, Encoder, ObsDecoder, RewardPredictor, ContPredictor, Posterior, Prior, Actor, Critic
 from .norm import RetNorm
 from .replay_buffer import Transition, ReplayBuffer, ReplayBufferState
-from .utils import kl_divergence, compute_lambda_returns
+from .utils import kl_divergence, compute_lambda_returns, r2
 
 
 @struct.dataclass
@@ -389,6 +389,7 @@ class DreamerV3:
 
             reward_symlog = self.models.reward_predictor.apply(params.reward_predictor, deter, stoch)
             loss_reward = self.models.reward_predictor.apply(params.reward_predictor, reward_symlog, minibatch.reward_prev, method=self.models.reward_predictor.loss)
+            r2_reward = r2(self.models.reward_predictor.apply(params.reward_predictor, reward_symlog, method=self.models.reward_predictor.postprocess), minibatch.reward)
 
             cont_logits = self.models.cont_predictor.apply(params.cont_predictor, deter, stoch)
             cont_target = jnp.float32(~minibatch.reset)
@@ -425,10 +426,14 @@ class DreamerV3:
             slow_values_imag = (
                 values_imag if self.config.slow_target else self.models.critic.apply(slow_critic_params, imag_rollout.deter, imag_rollout.stoch, method=self.models.critic.predict)
             )
+
             loss_critic_rollout = _critic_loss(value_pred_rollout_symlog, returns_rollout, ac_rollout_weight)
             loss_critic_rollout_reg = _critic_loss(value_pred_rollout_symlog, slow_values_rollout, ac_rollout_weight)
+            r2_critic_rollout = r2(self.models.critic.apply(params.critic, value_pred_rollout_symlog, method=self.models.critic.postprocess), returns_rollout)
+
             loss_critic_imag = _critic_loss(value_pred_imag_symlog, returns_imag, ac_imag_weight)
             loss_critic_imag_reg = _critic_loss(value_pred_imag_symlog, slow_values_imag, ac_imag_weight)
+            r2_critic_imag = r2(self.models.critic.apply(params.critic, value_pred_imag_symlog, method=self.models.critic.postprocess), returns_imag)
 
             ret_norm_params = self.ret_norm.apply(ret_norm_params, returns_imag, method=self.ret_norm.update, mutable=["state"])[1]
             policy = self.models.actor.apply(params.actor, imag_rollout.deter, imag_rollout.stoch, method=self.models.actor.predict)
@@ -453,9 +458,12 @@ class DreamerV3:
             metrics = {f"loss/{k}": v for k, v in losses.__dict__.items()}
             metrics["kl_clipfrac"] = kl_clipfrac
             metrics["rollout/reward"] = jnp.mean(minibatch.reward)
+            metrics["rollout/reward_pred_r2"] = r2_reward
             metrics["imagination/reward"] = jnp.mean(imag_rollout.reward)
             metrics["rollout/return"] = jnp.mean(returns_rollout)
+            metrics["rollout/value_pred_r2"] = r2_critic_rollout
             metrics["imagination/return"] = jnp.mean(returns_imag)
+            metrics["imagination/value_pred_r2"] = r2_critic_imag
             metrics["imagination/advantage"] = jnp.mean(adv)
             metrics.update({f"ret_norm/{k}": v for k, v in self.ret_norm.apply(ret_norm_params, method=self.ret_norm.get_state).items()})
 
