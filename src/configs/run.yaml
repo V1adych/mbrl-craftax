@@ -7,9 +7,9 @@ env:
 
 dreamerv3:
   num_updates: 1000
-  num_worlds: 32
+  num_worlds: 16
   rollout_length: 128
-  batch_size: 32
+  batch_size: 16
   num_grad_steps: 32
   replay_length: 16
   batch_length: 64
@@ -17,7 +17,7 @@ dreamerv3:
   imag_last_states: 16
   gamma: 0.99
   lam: 0.95
-  slow_critic_update_period: 8
+  slow_critic_update_period: 2
   slow_critic_tau: 0.98
   max_grad_norm: 2.5
   lr: 1e-2
@@ -25,6 +25,7 @@ dreamerv3:
   log_tensorboard: false
   save_checkpoints: false
   do_update: true
+  slow_target: false
 
   logging:
     log_dir: logs
@@ -48,6 +49,7 @@ dreamerv3:
     actor: 1.0
     critic_rollout: 0.3
     critic_imag: 1.0
+    slow_critic_reg: 1.0
     entropy: 3e-4
     free_nats: 1.0
 
