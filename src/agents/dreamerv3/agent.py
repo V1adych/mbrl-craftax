@@ -309,7 +309,7 @@ class DreamerV3:
             if all_metrics:
                 self.logger.info(f"step [{ts.global_step} / {self.config.max_steps}] logging metrics")
                 num_updates = len(all_metrics)
-                metrics = jax.tree.map(lambda *x: jnp.mean(x), *all_metrics)
+                metrics = jax.tree.map(lambda *x: jnp.concat(x).mean(), *all_metrics)
                 metrics["num_updates"] = num_updates
                 log_metrics(metrics, ts.global_step)
 
