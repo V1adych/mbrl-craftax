@@ -12,9 +12,9 @@ class ImageObsWrapper(BaseWrapper):
         return (obs * 255).astype(jnp.uint8)
 
     def reset(self, key: jax.Array, params: Any | None = None):
-        obs, env_state = self._env.reset(key, params)
-        return self._to_uint8(obs), env_state
+        obs, state = self._env.reset(key, params)
+        return self._to_uint8(obs), state
 
     def step(self, key: jax.Array, state: Any, action: jax.Array, params: Any | None = None):
-        obs, env_state, reward, done, info = self._env.step(key, state.env_state, action, params)
-        return self._to_uint8(obs), env_state, reward, done, info
+        obs, state, reward, done, info = self._env.step(key, state, action, params)
+        return self._to_uint8(obs), state, reward, done, info

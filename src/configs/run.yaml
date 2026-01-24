@@ -7,8 +7,8 @@ env:
 
 dreamerv3:
   max_steps: 1e7
-  num_worlds: 32
-  rollout_length: 8
+  num_worlds: 16
+  rollout_length: 1
   batch_size: 16
   replay_length: 1
   batch_length: 64

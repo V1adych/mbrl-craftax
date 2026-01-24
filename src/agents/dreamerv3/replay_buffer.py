@@ -43,7 +43,7 @@ class ReplayBuffer:
         t = rollout.obs.shape[0]
         ptr = self.ptr
 
-        idx = (ptr + np.arange(t, dtype=np.int32)) % np.asarray(self.max_length, dtype=np.int32)  # (T,)
+        idx = (ptr + np.arange(t, dtype=np.int32)) % np.asarray(self.max_length, dtype=np.int32)
 
         self.data.obs[idx] = rollout.obs
         self.data.action[idx] = rollout.action
@@ -70,7 +70,7 @@ class ReplayBuffer:
         start = jax.random.randint(key_t, (batch_size,), prefix_offset, max_start + prefix_offset, dtype=jnp.int32)
         env_id = jax.random.randint(key_env, (batch_size,), 0, self.data.obs.shape[1], dtype=jnp.int32)
         offsets = jnp.arange(length, dtype=jnp.int32)[:, None]
-        time_idx = np.array((start[None, :] + offsets) % self.config.max_length)
+        time_idx = np.array((start[None, :] + offsets) % self.max_length)
         env_idx = np.array(env_id[None, :])
 
         def _gather(buf: np.ndarray) -> jax.Array:
