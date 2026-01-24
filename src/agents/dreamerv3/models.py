@@ -15,7 +15,7 @@ class BlockDense(linen.Module):
     @linen.compact
     def __call__(self, x: jax.Array):
         kernel = self.param("kernel", self.kernel_init, (*x.shape[-2:], self.features))
-        x = jnp.einsum("...gi,gio->...go", x, kernel)
+        x = jnp.einsum("... g i, g i o -> ... g o", x, kernel)
         if self.bias:
             bias = self.param("bias", self.bias_init, (x.shape[-2], self.features))
             x += bias.reshape((1,) * (x.ndim - 2) + bias.shape)
@@ -65,7 +65,7 @@ class Encoder(linen.Module):
 
     @linen.compact
     def __call__(self, obs: jax.Array):
-        x = obs - 0.5
+        x = obs.astype(jnp.float32) / 255.0 - 0.5
         for i, mult in enumerate(self.config.mults):
             x = linen.Conv(features=self.config.depth * mult, kernel_size=(3, 3), strides=(2, 2), padding="VALID", name=f"conv_{i}")(x)
             x = jax.nn.silu(linen.RMSNorm(name=f"norm_{i}")(x))

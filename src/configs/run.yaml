@@ -6,18 +6,18 @@ env:
   auto_reset: true
 
 dreamerv3:
-  num_updates: 1000
-  num_worlds: 16
-  rollout_length: 128
+  max_steps: 1e7
+  num_worlds: 32
+  rollout_length: 8
   batch_size: 16
-  num_grad_steps: 32
-  replay_length: 16
+  replay_length: 1
   batch_length: 64
+  train_ratio: 32
   imag_horizon: 16
-  imag_last_states: 16
+  imag_last_states: 32
   gamma: 0.99
   lam: 0.95
-  slow_critic_update_period: 2
+  slow_critic_update_interval: 1
   slow_critic_tau: 0.98
   max_grad_norm: 2.5
   lr: 1e-4
@@ -30,7 +30,9 @@ dreamerv3:
   logging:
     log_dir: logs
     experiment_name: dreamerv3
-    max_ckpts: 3
+    max_ckpts: 5
+    ckpt_interval: 5e4
+    log_interval: 5e4
 
   ret_norm:
     tau: 0.99
@@ -54,7 +56,8 @@ dreamerv3:
     free_nats: 1.0
 
   replay_buffer:
-    max_length: 8192
+    max_size: 2.5e6
+    num_worlds: ${dreamerv3.num_worlds}
 
   dynamics:
     deter_size: 1024

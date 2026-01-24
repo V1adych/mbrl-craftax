@@ -1,4 +1,4 @@
-from typing import Any, Union, Optional
+from typing import Any
 import jax
 from flax import struct
 from .base_wrapper import BaseWrapper
@@ -15,23 +15,15 @@ class LogEnvState:
 
 
 class LogWrapper(BaseWrapper):
-    """Log the episode returns and lengths."""
-
     def __init__(self, env):
         super().__init__(env)
 
-    def reset(self, key: jax.Array, params: Optional[Any] = None):
+    def reset(self, key: jax.Array, params: Any | None = None):
         obs, env_state = self._env.reset(key, params)
         state = LogEnvState(env_state, 0.0, 0, 0.0, 0, 0)
         return obs, state
 
-    def step(
-        self,
-        key: jax.Array,
-        state: Any,
-        action: Union[int, float],
-        params: Optional[Any] = None,
-    ):
+    def step(self, key: jax.Array, state: Any, action: jax.Array, params: Any | None = None):
         obs, env_state, reward, done, info = self._env.step(key, state.env_state, action, params)
         new_episode_return = state.episode_returns + reward
         new_episode_length = state.episode_lengths + 1

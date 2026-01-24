@@ -1,5 +1,5 @@
 import jax
-from wrappers import LogWrapper
+from wrappers import LogWrapper, ImageObsWrapper
 from craftax.craftax_env import make_craftax_env_from_name
 from omegaconf import OmegaConf
 from agents import get_agent
@@ -12,7 +12,7 @@ def main():
     print(OmegaConf.to_yaml(config, resolve=True))
 
     agent = get_agent(config)
-    env = LogWrapper(make_craftax_env_from_name(**config.env))
+    env = ImageObsWrapper(LogWrapper(make_craftax_env_from_name(**config.env)))
     key = jax.random.key(config.seed)
     agent.fit(key, env)
 
