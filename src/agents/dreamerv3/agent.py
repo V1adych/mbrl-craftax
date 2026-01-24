@@ -1,7 +1,6 @@
 from __future__ import annotations
 from pathlib import Path
 from datetime import datetime
-import logging
 import operator
 from typing import Any
 from collections.abc import Callable
@@ -116,7 +115,6 @@ class DreamerV3:
         self.log_dir: Path = None
         self.ckpt_opts = ocp.CheckpointManagerOptions(max_to_keep=self.config.logging.max_ckpts, create=True)
         self.ret_norm = RetNorm(self.config.ret_norm)
-        self.logger = logging.getLogger(self.__class__.__name__)
 
         self.loss_weights: Losses = Losses(
             obs=jnp.float32(self.config.loss.dec_obs),
@@ -201,7 +199,7 @@ class DreamerV3:
         )
 
     def fit(self, key: jax.Array, env: Environment):
-        self.logger.info("starting training")
+        print("starting training")
         reset_fn = jax.vmap(env.reset)
         key, *reset_keys = jax.random.split(key, self.config.num_worlds + 1)
         obs, env_state = reset_fn(jnp.array(reset_keys))
@@ -244,7 +242,7 @@ class DreamerV3:
         self.replay = ReplayBuffer(self.config.replay_buffer)
         self.replay.init(dummy)
 
-        self.logger.info("initialization finished")
+        print("initialization finished")
 
         last_ckpt = -1
         last_log = -1
@@ -275,7 +273,7 @@ class DreamerV3:
 
         while ts.global_step < self.config.max_steps:
             key, rollout_key = jax.random.split(key)
-            self.logger.info(f"step [{ts.global_step} / {self.config.max_steps}] collecting rollouts")
+            print(f"step [{ts.global_step} / {self.config.max_steps}] collecting rollouts")
             ts, carry, rollout, debug_infos = _collect_rollouts(rollout_key, ts, carry)
             self.replay.add(rollout)
             if self.config.log_tensorboard:
@@ -284,7 +282,7 @@ class DreamerV3:
 
             log_step = ts.global_step // self.config.logging.log_interval
             if self.config.log_tensorboard and log_step > last_log:
-                self.logger.info(f"step [{ts.global_step} / {self.config.max_steps}] logging rollout info")
+                print(f"step [{ts.global_step} / {self.config.max_steps}] logging rollout info")
                 last_log = log_step
                 all_infos = jax.tree.map(lambda *x: jnp.concatenate(x, axis=0), *all_infos)
                 log_info(all_infos, ts.global_step)
@@ -292,13 +290,13 @@ class DreamerV3:
 
             ckpt_step = ts.global_step // self.config.logging.ckpt_interval
             if self.config.save_checkpoints and ckpt_step > last_ckpt:
-                self.logger.info(f"step [{ts.global_step} / {self.config.max_steps}] saving checkpoint")
+                print(f"step [{ts.global_step} / {self.config.max_steps}] saving checkpoint")
                 last_ckpt = ckpt_step
                 self._save_checkpoint(ts)
 
             all_metrics = []
             while update_accum >= accum_decrement and self.replay.can_sample(self.config.batch_length + self.config.replay_length):
-                self.logger.info(f"step [{ts.global_step} / {self.config.max_steps}] accum [{update_accum} / {accum_decrement}] updating")
+                print(f"step [{ts.global_step} / {self.config.max_steps}] accum [{update_accum} / {accum_decrement}] updating")
                 key, sample_key, update_key = jax.random.split(key, 3)
                 batch = self.replay.sample(sample_key, self.config.batch_length + self.config.replay_length, self.config.batch_size)
                 ts, metrics = _update(update_key, ts, batch)
@@ -307,7 +305,7 @@ class DreamerV3:
                     all_metrics.append(metrics)
 
             if all_metrics:
-                self.logger.info(f"step [{ts.global_step} / {self.config.max_steps}] logging metrics")
+                print(f"step [{ts.global_step} / {self.config.max_steps}] logging metrics")
                 num_updates = len(all_metrics)
                 metrics = jax.tree.map(lambda *x: jnp.concat(x).mean(), *all_metrics)
                 metrics["num_updates"] = num_updates
@@ -509,18 +507,16 @@ class DreamerV3:
         tab_key = jax.random.key(0)
 
         dummy_obs = jnp.zeros((batch_size, *obs_shape))
-        architecture_msg = []
-        architecture_msg.append(self.models.encoder.tabulate(tab_key, dummy_obs, compute_flops=True, compute_vjp_flops=True))
+        print(self.models.encoder.tabulate(tab_key, dummy_obs, compute_flops=True, compute_vjp_flops=True))
         deter = self.models.dynamics.get_initial_deter(batch_size)
         embed = jnp.zeros((batch_size, self.config.encoder.hidden_size))
         stoch = jnp.zeros((batch_size, self.config.dynamics.stoch, self.config.dynamics.classes))
         act = jnp.zeros((batch_size,), dtype=jnp.int32)
-        architecture_msg.append(self.models.posterior.tabulate(tab_key, deter, embed, compute_flops=True, compute_vjp_flops=True))
-        architecture_msg.append(self.models.prior.tabulate(tab_key, deter, compute_flops=True, compute_vjp_flops=True))
-        architecture_msg.append(self.models.actor.tabulate(tab_key, deter, stoch, compute_flops=True, compute_vjp_flops=True))
-        architecture_msg.append(self.models.critic.tabulate(tab_key, deter, stoch, compute_flops=True, compute_vjp_flops=True))
-        architecture_msg.append(self.models.obs_decoder.tabulate(tab_key, deter, stoch, compute_flops=True, compute_vjp_flops=True))
-        architecture_msg.append(self.models.reward_predictor.tabulate(tab_key, deter, stoch, compute_flops=True, compute_vjp_flops=True))
-        architecture_msg.append(self.models.cont_predictor.tabulate(tab_key, deter, stoch, compute_flops=True, compute_vjp_flops=True))
-        architecture_msg.append(self.models.dynamics.tabulate(tab_key, deter, stoch, act, compute_flops=True, compute_vjp_flops=True))
-        self.logger.info(f"architecture:\n{'\n'.join(architecture_msg)}")
+        print(self.models.posterior.tabulate(tab_key, deter, embed, compute_flops=True, compute_vjp_flops=True))
+        print(self.models.prior.tabulate(tab_key, deter, compute_flops=True, compute_vjp_flops=True))
+        print(self.models.actor.tabulate(tab_key, deter, stoch, compute_flops=True, compute_vjp_flops=True))
+        print(self.models.critic.tabulate(tab_key, deter, stoch, compute_flops=True, compute_vjp_flops=True))
+        print(self.models.obs_decoder.tabulate(tab_key, deter, stoch, compute_flops=True, compute_vjp_flops=True))
+        print(self.models.reward_predictor.tabulate(tab_key, deter, stoch, compute_flops=True, compute_vjp_flops=True))
+        print(self.models.cont_predictor.tabulate(tab_key, deter, stoch, compute_flops=True, compute_vjp_flops=True))
+        print(self.models.dynamics.tabulate(tab_key, deter, stoch, act, compute_flops=True, compute_vjp_flops=True))
