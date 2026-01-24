@@ -20,7 +20,7 @@ dreamerv3:
   slow_critic_update_period: 2
   slow_critic_tau: 0.98
   max_grad_norm: 2.5
-  lr: 1e-2
+  lr: 1e-4
   weight_decay: 1e-2
   log_tensorboard: false
   save_checkpoints: false
@@ -54,7 +54,7 @@ dreamerv3:
     free_nats: 1.0
 
   replay_buffer:
-    max_length: 4096
+    max_length: 8192
 
   dynamics:
     deter_size: 1024

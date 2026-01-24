@@ -221,7 +221,7 @@ class DreamerV3:
         tx = optax.masked(
             optax.chain(
                 optax.clip_by_global_norm(self.config.max_grad_norm),
-                optax.contrib.muon(learning_rate=self.config.lr, weight_decay=self.config.weight_decay),
+                optax.adamw(learning_rate=self.config.lr, weight_decay=self.config.weight_decay),
             ),
             jax.tree.map_with_path(_is_params, variables),
         )
@@ -389,7 +389,7 @@ class DreamerV3:
 
             reward_symlog = self.models.reward_predictor.apply(params.reward_predictor, deter, stoch)
             loss_reward = self.models.reward_predictor.apply(params.reward_predictor, reward_symlog, minibatch.reward_prev, method=self.models.reward_predictor.loss)
-            r2_reward = r2(self.models.reward_predictor.apply(params.reward_predictor, reward_symlog, method=self.models.reward_predictor.postprocess), minibatch.reward)
+            r2_reward = r2(self.models.reward_predictor.apply(params.reward_predictor, reward_symlog, method=self.models.reward_predictor.postprocess), minibatch.reward_prev)
 
             cont_logits = self.models.cont_predictor.apply(params.cont_predictor, deter, stoch)
             cont_target = jnp.float32(~minibatch.reset)
