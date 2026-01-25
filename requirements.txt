@@ -2,7 +2,7 @@ jax[cuda12]==0.8.2
 flax==0.12.2
 optax==0.2.6
 distrax==0.1.7
-orbax-checkpoint==0.11.31
+safetensors==0.7.0
 einops==0.8.1
 craftax==1.5.0
 omegaconf==2.3.0

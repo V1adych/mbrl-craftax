@@ -6,10 +6,10 @@ from typing import Any
 from collections.abc import Callable
 import jax
 from jax import numpy as jnp
-from flax import struct
+from flax import struct, traverse_util, serialization
 from flax.training import train_state
 import optax
-from orbax import checkpoint as ocp
+from safetensors.flax import load_file, save_file
 from einops import rearrange
 from omegaconf import DictConfig, OmegaConf
 from gymnax.environments.environment import Environment
@@ -112,8 +112,8 @@ class DreamerV3:
         self.models: Models = None
         self.replay: ReplayBuffer = None
         self.writer: SummaryWriter = None
-        self.log_dir: Path = None
-        self.ckpt_opts = ocp.CheckpointManagerOptions(max_to_keep=self.config.logging.max_ckpts, create=True)
+        self.log_dir: Path = Path(self.config.logging.log_dir) / f"{self.config.logging.experiment_name}-{datetime.now().strftime('%Y-%m-%d-%H-%M-%S')}"
+
         self.ret_norm = RetNorm(self.config.ret_norm)
 
         self.loss_weights: Losses = Losses(
@@ -131,13 +131,37 @@ class DreamerV3:
         )
 
     def _init_logging(self):
-        self.log_dir = Path(self.config.logging.log_dir) / f"{self.config.logging.experiment_name}-{datetime.now().strftime('%Y-%m-%d-%H-%M-%S')}"
         self.writer = SummaryWriter(log_dir=self.log_dir)
 
     def _save_checkpoint(self, ts: DreamerState):
-        handler = ocp.PyTreeCheckpointHandler()
-        with ocp.CheckpointManager((self.log_dir / "ckpts").absolute(), item_handlers=handler, options=self.ckpt_opts) as mgr:
-            mgr.save(ts.global_step, ts)
+        max_ckpts = self.config.logging.max_ckpts
+        if max_ckpts <= 0:
+            return
+
+        ckpt_dir = self.log_dir / "ckpts"
+        ckpt_dir.mkdir(parents=True, exist_ok=True)
+        num_ckpts = len(list(ckpt_dir.glob("*.safetensors")))
+        if num_ckpts >= max_ckpts:
+            num_delete = num_ckpts - max_ckpts + 1
+            for ckpt in sorted(ckpt_dir.glob("*.safetensors"))[:num_delete]:
+                ckpt.unlink()
+
+        ckpt_path = ckpt_dir / f"{ts.global_step}.safetensors"
+        serialized = serialization.to_state_dict(ts)
+        save_file(traverse_util.flatten_dict(serialized, sep="."), ckpt_path)
+        print(f"saved checkpoint to {ckpt_path}")
+
+    def _load_checkpoint(self, ts_template: DreamerState, path: str):
+        print(f"loading checkpoint from {path}")
+        loaded_tensors = load_file(path)
+
+        state_dict = serialization.to_state_dict(ts_template)
+        flat_state_dict = traverse_util.flatten_dict(state_dict, keep_empty_nodes=True, sep=".")
+        flat_state_dict.update(loaded_tensors)
+        serialized = traverse_util.unflatten_dict(flat_state_dict, sep=".")
+
+        ts = serialization.from_state_dict(ts_template, serialized)
+        return ts
 
     def _init_models(self, key: jax.Array, env: Environment, env_state: EnvState):
         actspace = env.action_space(env_state).n
@@ -200,9 +224,8 @@ class DreamerV3:
 
     def fit(self, key: jax.Array, env: Environment):
         print("starting training")
-        reset_fn = jax.vmap(env.reset)
         key, *reset_keys = jax.random.split(key, self.config.num_worlds + 1)
-        obs, env_state = reset_fn(jnp.array(reset_keys))
+        obs, env_state = jax.vmap(env.reset)(jnp.array(reset_keys))
 
         key, init_key = jax.random.split(key)
         variables, slow_critic_params, ret_norm_params = self._init_models(init_key, env, env_state)
@@ -224,10 +247,14 @@ class DreamerV3:
             ),
             jax.tree.map_with_path(_is_params, variables),
         )
+        ts = DreamerState.create(params=variables, tx=tx, global_step=0, slow_critic_params=slow_critic_params, ret_norm_params=ret_norm_params)
+
+        if self.config.continue_from_ckpt_path is not None:
+            ts = self._load_checkpoint(ts, self.config.continue_from_ckpt_path)
+
         init_deter = self.models.dynamics.get_initial_deter(self.config.num_worlds)
         init_reward = jnp.zeros((self.config.num_worlds,), dtype=jnp.float32)
         init_term = jnp.ones((self.config.num_worlds,), dtype=jnp.bool)
-        ts = DreamerState.create(params=variables, tx=tx, global_step=0, slow_critic_params=slow_critic_params, ret_norm_params=ret_norm_params)
         carry = DreamerCarry(env_state=env_state, last_obs=obs, last_deter=init_deter, last_reward=init_reward, last_term=init_term)
 
         obs_shape = env.observation_space(env_state).shape
@@ -270,6 +297,8 @@ class DreamerV3:
         @jax.jit
         def _update(key: jax.Array, ts: DreamerState, batch: Transition):
             return self.update(key, ts, batch)
+
+        self.config.max_steps = int(self.config.max_steps)
 
         while ts.global_step < self.config.max_steps:
             key, rollout_key = jax.random.split(key)
