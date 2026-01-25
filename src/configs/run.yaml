@@ -61,7 +61,7 @@ dreamerv3:
     free_nats: 1.0
 
   replay_buffer:
-    max_size: 2.5e6
+    max_size: 5e6
     num_worlds: ${dreamerv3.num_worlds}
 
   dynamics:
@@ -75,12 +75,12 @@ dreamerv3:
   encoder:
     depth: 32
     mults: [2, 3, 4, 4]
-    hidden_size: 256
+    hidden_size: 512
 
   obs_decoder:
     depth: 32
     mults: [2, 3, 4, 4]
-    hidden_size: 256
+    hidden_size: 2048
 
   reward_predictor:
     hidden_size: 256
