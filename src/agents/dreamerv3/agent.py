@@ -143,8 +143,10 @@ class DreamerV3:
         num_ckpts = len(list(ckpt_dir.glob("*.safetensors")))
         if num_ckpts >= max_ckpts:
             num_delete = num_ckpts - max_ckpts + 1
-            for ckpt in sorted(ckpt_dir.glob("*.safetensors"))[:num_delete]:
+            pairs = list(map(lambda x: (int(x.stem), x), ckpt_dir.glob("*.safetensors")))
+            for step, ckpt in sorted(pairs)[:num_delete]:
                 ckpt.unlink()
+                print(f"deleted checkpoint at step {step}")
 
         ckpt_path = ckpt_dir / f"{ts.global_step}.safetensors"
         serialized = serialization.to_state_dict(ts)
