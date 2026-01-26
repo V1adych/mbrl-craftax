@@ -95,7 +95,7 @@ class ObsDecoder(linen.Module):
         return 0.5 * jnp.square(pred - target).sum(axis=(-3, -2, -1)).mean()
 
     def predict(self, deter: jax.Array, stoch: jax.Array):
-        return self(deter, stoch)
+        return (jnp.clip(self(deter, stoch), 0, 1) * 255.0).astype(jnp.uint8)
 
 
 class RewardPredictor(linen.Module):
