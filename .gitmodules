@@ -1,0 +1,9 @@
+[submodule "submodules/Craftax_Baselines"]
+	path = submodules/Craftax_Baselines
+	url = git@github.com:MichaelTMatthews/Craftax_Baselines.git
+[submodule "submodules/iris"]
+	path = submodules/iris
+	url = git@github.com:eloialonso/iris.git
+[submodule "submodules/dreamerv3"]
+	path = submodules/dreamerv3
+	url = git@github.com:danijar/dreamerv3.git
