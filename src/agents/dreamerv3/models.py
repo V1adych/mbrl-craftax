@@ -3,7 +3,7 @@ from jax import numpy as jnp
 from flax import linen
 import distrax
 from omegaconf import DictConfig
-from .utils import symexp, symlog, two_hot_symlog
+from ...utils import symexp, symlog, two_hot_symlog
 
 
 class BlockDense(linen.Module):
