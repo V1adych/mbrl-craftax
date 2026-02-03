@@ -2,6 +2,7 @@ import jax
 from jax import numpy as jnp
 from flax import nnx
 from omegaconf import DictConfig
+from ...utils import symlog
 
 
 class RoPE(nnx.Module):
@@ -114,13 +115,15 @@ class Dynamics(nnx.Module):
             obs_codes: (B, L, K)
             action: (B, L)
         """
-        B, Lm1, K = obs_codes.shape
+        B, L, K = obs_codes.shape
         obs_embedded = self.obs_embed(obs_codes)
         act_embedded = self.act_embed(action)
-        x = jnp.concat([obs_embedded, act_embedded[:, :, None]], axis=-1)
-        mask = self._get_block_causal_mask(B, Lm1 + 1, K) if causal else None
+        x = jnp.concat([obs_embedded, act_embedded[:, :, None]], axis=-2)
+        mask = self._get_block_causal_mask(B, L, K + 1) if causal else None
+        x = x.reshape(B, L * (K + 1), -1)
         for block in self.blocks:
             x = block(x, mask=mask)
+        x = x.reshape(B, L, K + 1, -1)
         return x
 
 
@@ -150,3 +153,27 @@ class TermPredictor(nnx.Module):
 
     def __call__(self, x: jax.Array) -> jax.Array:
         return self.mlp(x)
+
+
+class GRUActorCritic(nnx.Module):
+    def __init__(self, rngs: nnx.Rngs, config: DictConfig):
+        self.config = config
+        self.embed = nnx.Embed(config.num_codes + 1, config.hidden_size, rngs=rngs)
+        self.blocks = [AttentionBlock(rngs, config.hidden_size, config.num_heads, config.dropout, config.ffn_scale) for _ in range(config.num_layers)]
+        self.gru = nnx.GRUCell(config.hidden_size, config.hidden_size, rngs=rngs)
+        self.actor = nnx.Linear(config.hidden_size, config.action_space_size, rngs=rngs)
+        self.critic = nnx.Linear(config.hidden_size, config.num_bins, rngs=rngs)
+        self.bins = nnx.Variable(jnp.linspace(symlog(config.min_val), symlog(config.max_val), config.num_bins))
+
+    def __call__(self, carry: jax.Array, obs_codes: jax.Array):
+        cls_tok = jnp.full((*obs_codes.shape[:-1], 1), self.config.num_codes)
+        x = jnp.concat([cls_tok, obs_codes], axis=-1)
+        x = self.embed(x)
+        for block in self.blocks:
+            x = block(x)
+        x = x[..., 0, :]
+        new_carry, x = self.gru(carry, x)
+        logits = self.actor(x)
+        values = self.critic(x)
+
+        return new_carry, logits, values
