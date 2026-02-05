@@ -1,0 +1,54 @@
+tok_max_grad_norm: 2.5
+tok_lr: 1e-4
+wm_max_grad_norm: 2.5
+wm_lr: 1e-4
+ac_max_grad_norm: 2.5
+ac_lr: 1e-4
+
+num_codes: 512
+patch_size: 7
+num_worlds: 32
+
+encoder:
+  hidden_size: 512
+  num_heads: 8
+  dropout: 0.1
+  ffn_scale: 2.0
+  num_layers: 4
+  patch_size: ${agent.patch_size}
+  num_codes: ${agent.num_codes}
+
+decoder:
+  hidden_size: 512
+  num_heads: 8
+  dropout: 0.1
+  ffn_scale: 2.0
+  num_layers: 2
+  patch_size: ${agent.patch_size}
+
+dynamics:
+  hidden_size: 512
+  num_heads: 8
+  dropout: 0.1
+  ffn_scale: 2.0
+  num_layers: 6
+  num_codes: ${agent.num_codes}
+
+reward_predictor:
+  hidden_size: 256
+  num_layers: 2
+
+term_predictor:
+  hidden_size: 256
+  num_layers: 2
+
+actor_critic:
+  hidden_size: 256
+  num_heads: 8
+  dropout: 0.1
+  ffn_scale: 2.0
+  num_layers: 2
+  num_codes: ${agent.num_codes}
+  num_bins: 255
+  min_val: -100.0
+  max_val: 100.0

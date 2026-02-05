@@ -2,7 +2,7 @@ import jax
 from jax import numpy as jnp
 from flax import nnx
 from omegaconf import DictConfig
-from ...utils import symlog
+from ..utils import symlog
 
 
 class RoPE(nnx.Module):
@@ -38,7 +38,7 @@ def make_rope_attn_fn(rope: RoPE):
 
 class AttentionBlock(nnx.Module):
     def __init__(self, rngs: nnx.Rngs, hidden_size: int, num_heads: int, dropout: float = 0.0, ffn_scale: float = 2.0):
-        self.ln1 = nnx.LayerNorm(hidden_size, rngs=rngs)
+        self.norm1 = nnx.RMSNorm(hidden_size, rngs=rngs)
         self.mha = nnx.MultiHeadAttention(
             in_features=hidden_size,
             qkv_features=hidden_size,
@@ -48,7 +48,7 @@ class AttentionBlock(nnx.Module):
             attention_fn=make_rope_attn_fn(RoPE()),
             rngs=rngs,
         )
-        self.ln2 = nnx.LayerNorm(hidden_size, rngs=rngs)
+        self.norm2 = nnx.RMSNorm(hidden_size, rngs=rngs)
         ffn_hidden_size = int(ffn_scale * hidden_size)
         self.mlp = nnx.Sequential(
             nnx.Linear(hidden_size, ffn_hidden_size, rngs=rngs),
@@ -57,24 +57,23 @@ class AttentionBlock(nnx.Module):
         )
 
     def __call__(self, x: jax.Array, mask: jax.Array | None = None) -> jax.Array:
-        x = x + self.mha(self.ln1(x), mask=mask)
-        x = x + self.mlp(self.ln2(x))
+        x = x + self.mha(self.norm1(x), mask=mask)
+        x = x + self.mlp(self.norm2(x))
         return x
 
 
 class Encoder(nnx.Module):
     def __init__(self, rngs: nnx.Rngs, config: DictConfig):
         self.config = config
-        self.conv_proj = nnx.Conv(3, config.hidden_size, kernel_size=(config.patch_size, config.patch_size), stride=(config.patch_size, config.patch_size), padding="VALID")
-        self.blocks = [AttentionBlock(rngs, config.hidden_size, config.num_heads, config.dropout, config.ffn_scale) for _ in range(config.num_layers)]
+        self.conv_proj = nnx.Conv(3, config.hidden_size, kernel_size=(config.patch_size, config.patch_size), strides=(config.patch_size, config.patch_size), padding="VALID", rngs=rngs)
+        self.blocks = nnx.Sequential(*[AttentionBlock(rngs, config.hidden_size, config.num_heads, config.dropout, config.ffn_scale) for _ in range(config.num_layers)])
         max_val = 1 / config.num_codes
         self.codebook = nnx.Param(jax.random.uniform(rngs.next_key(), (config.num_codes, config.hidden_size), minval=-max_val, maxval=max_val))
 
     def __call__(self, x: jax.Array):
         x = self.conv_proj(x)
         x = x.reshape(x.shape[0], -1, x.shape[-1])
-        for block in self.blocks:
-            x = block(x)
+        x = self.blocks(x)
         B, T, D = x.shape
         x_flat = x.reshape(B * T, D)
         dist = jnp.sum(x**2, axis=-1, keepdims=True) + jnp.sum(self.codebook**2, axis=-1)[None, :] - 2 * jnp.einsum("b d, n d -> b n", x_flat, self.codebook)
@@ -100,11 +99,11 @@ class Decoder(nnx.Module):
 
 
 class Dynamics(nnx.Module):
-    def __init__(self, rngs: nnx.Rngs, config: DictConfig):
+    def __init__(self, rngs: nnx.Rngs, config: DictConfig, action_space_size: int):
         self.config = config
-        self.act_embed = nnx.Embedding(config.action_space_size, config.hidden_size, rngs=rngs)
-        self.obs_embed = nnx.Embedding(config.num_codes, config.hidden_size, rngs=rngs)
-        self.blocks = [AttentionBlock(rngs, config.hidden_size, config.num_heads, config.dropout, config.ffn_scale) for _ in range(config.num_layers)]
+        self.act_embed = nnx.Embed(action_space_size, config.hidden_size, rngs=rngs)
+        self.obs_embed = nnx.Embed(config.num_codes, config.hidden_size, rngs=rngs)
+        self.blocks = nnx.List([AttentionBlock(rngs, config.hidden_size, config.num_heads, config.dropout, config.ffn_scale) for _ in range(config.num_layers)])
 
     def _get_block_causal_mask(self, B: int, L: int, K: int) -> jax.Array:
         return jnp.broadcast_to(jnp.kron(jnp.tril(jnp.ones((L, L)), k=0), jnp.ones((K, K)))[None, :, :], (B, L * K, L * K))
@@ -130,12 +129,12 @@ class Dynamics(nnx.Module):
 class RewardPredictor(nnx.Module):
     def __init__(self, rngs: nnx.Rngs, config: DictConfig):
         self.config = config
-        mlp = []
+        layers = []
         for _ in range(config.num_layers):
-            mlp.append(nnx.Linear(config.hidden_size, config.hidden_size, rngs=rngs))
-            mlp.append(nnx.gelu)
-        mlp.append(nnx.Linear(config.hidden_size, 3, rngs=rngs))
-        self.mlp = nnx.Sequential(*mlp)
+            layers.append(nnx.Linear(config.hidden_size, config.hidden_size, rngs=rngs))
+            layers.append(nnx.gelu)
+        layers.append(nnx.Linear(config.hidden_size, 3, rngs=rngs))
+        self.mlp = nnx.Sequential(*layers)
 
     def __call__(self, x: jax.Array) -> jax.Array:
         return self.mlp(x)
@@ -144,24 +143,24 @@ class RewardPredictor(nnx.Module):
 class TermPredictor(nnx.Module):
     def __init__(self, rngs: nnx.Rngs, config: DictConfig):
         self.config = config
-        self.mlp = []
+        layers = []
         for _ in range(config.num_layers):
-            self.mlp.append(nnx.Linear(config.hidden_size, config.hidden_size, rngs=rngs))
-            self.mlp.append(nnx.gelu)
-        self.mlp.append(nnx.Linear(config.hidden_size, 2, rngs=rngs))
-        self.mlp = nnx.Sequential(*self.mlp)
+            layers.append(nnx.Linear(config.hidden_size, config.hidden_size, rngs=rngs))
+            layers.append(nnx.gelu)
+        layers.append(nnx.Linear(config.hidden_size, 2, rngs=rngs))
+        self.mlp = nnx.Sequential(*layers)
 
     def __call__(self, x: jax.Array) -> jax.Array:
         return self.mlp(x)
 
 
 class GRUActorCritic(nnx.Module):
-    def __init__(self, rngs: nnx.Rngs, config: DictConfig):
+    def __init__(self, rngs: nnx.Rngs, config: DictConfig, action_space_size: int):
         self.config = config
         self.embed = nnx.Embed(config.num_codes + 1, config.hidden_size, rngs=rngs)
-        self.blocks = [AttentionBlock(rngs, config.hidden_size, config.num_heads, config.dropout, config.ffn_scale) for _ in range(config.num_layers)]
+        self.blocks = nnx.List([AttentionBlock(rngs, config.hidden_size, config.num_heads, config.dropout, config.ffn_scale) for _ in range(config.num_layers)])
         self.gru = nnx.GRUCell(config.hidden_size, config.hidden_size, rngs=rngs)
-        self.actor = nnx.Linear(config.hidden_size, config.action_space_size, rngs=rngs)
+        self.actor = nnx.Linear(config.hidden_size, action_space_size, rngs=rngs)
         self.critic = nnx.Linear(config.hidden_size, config.num_bins, rngs=rngs)
         self.bins = nnx.Variable(jnp.linspace(symlog(config.min_val), symlog(config.max_val), config.num_bins))
 

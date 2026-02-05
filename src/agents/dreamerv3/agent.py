@@ -18,7 +18,7 @@ from tensorboardX import SummaryWriter
 from .models import Dynamics, Encoder, ObsDecoder, RewardPredictor, ContPredictor, Posterior, Prior, Actor, Critic
 from .norm import RetNorm
 from .replay_buffer import Transition, ReplayBuffer
-from ...utils import kl_divergence, compute_lambda_returns, r2
+from ..utils import kl_divergence, compute_lambda_returns, r2
 
 
 @struct.dataclass

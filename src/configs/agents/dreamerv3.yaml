@@ -1,0 +1,112 @@
+max_steps: 1e7
+num_worlds: 16
+rollout_length: 1
+batch_size: 16
+replay_length: 1
+batch_length: 64
+train_ratio: 32
+imag_horizon: 16
+imag_last_states: 32
+gamma: 0.99
+lam: 0.95
+slow_critic_update_interval: 1
+slow_critic_tau: 0.98
+max_grad_norm: 2.5
+lr: 1e-4
+weight_decay: 1e-2
+log_tensorboard: false
+save_checkpoints: false
+do_update: true
+slow_target: false
+
+stoch_size: 64
+stoch_classes: 32
+
+continue_from_ckpt_path: null
+
+logging:
+  log_dir: logs
+  experiment_name: dreamerv3
+  max_ckpts: 10
+  ckpt_interval: 2.5e4
+  log_interval: 1e4
+
+ret_norm:
+  tau: 0.99
+  low_quantile: 0.05
+  high_quantile: 0.95
+  low_init: 0.0
+  high_init: 0.0
+  min_scale: 1.0
+
+loss:
+  dec_obs: 1.0
+  dec_reward: 1.0
+  dec_cont: 1.0
+  dyn: 1.0
+  rep: 0.1
+  actor: 1.0
+  critic_rollout: 0.3
+  critic_imag: 1.0
+  slow_critic_reg: 1.0
+  entropy: 3e-4
+  free_nats: 1.0
+
+replay_buffer:
+  max_size: 5e6
+  num_worlds: ${agent.num_worlds}
+
+dynamics:
+  deter_size: 4096
+  hidden_size: 1024
+  num_layers: 3
+  blocks: 8
+  stoch: ${agent.stoch_size}
+  classes: ${agent.stoch_classes}
+
+encoder:
+  depth: 32
+  mults: [2, 3, 4, 4]
+  hidden_size: 512
+
+obs_decoder:
+  depth: 32
+  mults: [2, 3, 4, 4]
+  hidden_size: 2048
+
+reward_predictor:
+  hidden_size: 256
+  num_layers: 2
+  num_bins: 255
+  min_val: -1000.0
+  max_val: 1000.0
+
+cont_predictor:
+  hidden_size: 256
+  num_layers: 2
+
+posterior:
+  num_layers: 2
+  hidden_size: 256
+  stoch_size: ${agent.stoch_size}
+  classes: ${agent.stoch_classes}
+  uniform_frac: 0.01
+
+prior:
+  num_layers: 2
+  hidden_size: 256
+  stoch_size: ${agent.stoch_size}
+  classes: ${agent.stoch_classes}
+  uniform_frac: 0.01
+
+actor:
+  num_layers: 2
+  hidden_size: 256
+  uniform_frac: 0.01
+
+critic:
+  num_layers: 2
+  hidden_size: 256
+  num_bins: 255
+  min_val: -1000.0
+  max_val: 1000.0
