@@ -44,6 +44,7 @@ class AttentionBlock(nnx.Module):
             qkv_features=hidden_size,
             num_heads=num_heads,
             decode=False,
+            deterministic=False,
             dropout_rate=dropout,
             attention_fn=make_rope_attn_fn(RoPE()),
             rngs=rngs,
@@ -65,22 +66,23 @@ class AttentionBlock(nnx.Module):
 class Encoder(nnx.Module):
     def __init__(self, rngs: nnx.Rngs, config: DictConfig):
         self.config = config
-        self.conv_proj = nnx.Conv(3, config.hidden_size, kernel_size=(config.patch_size, config.patch_size), strides=(config.patch_size, config.patch_size), padding="VALID", rngs=rngs)
+        self.conv_proj = nnx.Conv(
+            3, config.hidden_size, kernel_size=(config.patch_size, config.patch_size), strides=(config.patch_size, config.patch_size), padding="VALID", rngs=rngs
+        )
         self.blocks = nnx.Sequential(*[AttentionBlock(rngs, config.hidden_size, config.num_heads, config.dropout, config.ffn_scale) for _ in range(config.num_layers)])
         max_val = 1 / config.num_codes
         self.codebook = nnx.Param(jax.random.uniform(rngs.next_key(), (config.num_codes, config.hidden_size), minval=-max_val, maxval=max_val))
 
     def __call__(self, x: jax.Array):
-        x = self.conv_proj(x)
+        x = self.conv_proj(x.astype(jnp.float32) / 255.0 - 0.5)
         x = x.reshape(x.shape[0], -1, x.shape[-1])
         x = self.blocks(x)
         B, T, D = x.shape
         x_flat = x.reshape(B * T, D)
-        dist = jnp.sum(x**2, axis=-1, keepdims=True) + jnp.sum(self.codebook**2, axis=-1)[None, :] - 2 * jnp.einsum("b d, n d -> b n", x_flat, self.codebook)
+        dist = jnp.sum(x_flat**2, axis=-1, keepdims=True) + jnp.sum(self.codebook**2, axis=-1)[None, :] - 2 * jnp.einsum("b d, n d -> b n", x_flat, self.codebook)
         tok_ids = dist.argmin(axis=-1).reshape(B, T)
-        vq_toks = self.codebook[tok_ids]
 
-        return x, vq_toks, tok_ids
+        return x, tok_ids
 
 
 class Decoder(nnx.Module):
@@ -96,6 +98,19 @@ class Decoder(nnx.Module):
         x = x.reshape(x.shape[0], self.config.latent_h, self.config.latent_w, x.shape[-1])
         x = self.conv_upsample(x)
         return x
+
+
+class Tokenizer(nnx.Module):
+    def __init__(self, encoder: Encoder, decoder: Decoder):
+        self.encoder = encoder
+        self.decoder = decoder
+
+    def encode(self, x: jax.Array) -> jax.Array:
+        return self.encoder(x)
+
+    def decode(self, ids: jax.Array) -> jax.Array:
+        x = self.encoder.codebook[ids]
+        return self.decoder(x)
 
 
 class Dynamics(nnx.Module):
